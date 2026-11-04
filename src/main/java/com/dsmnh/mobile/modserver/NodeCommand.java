@@ -45,6 +45,9 @@ public final class NodeCommand extends CommandBase {
 
     @Override
     public void processCommand(ICommandSender sender, String[] args) {
+        // 命令执行记录：既是运维审计（企划书 03），也便于无人值守验证
+        HorizonModServer.LOG.info("dsmnhmobile 命令：{}（来自 {}）",
+                java.util.Arrays.toString(args), sender.getCommandSenderName());
         if (args.length == 0) {
             sender.addChatMessage(new ChatComponentText(
                     EnumChatFormatting.RED + MainThreadQueue.line(getCommandUsage(sender))));
@@ -52,7 +55,7 @@ public final class NodeCommand extends CommandBase {
         }
         String sub = args[0].toLowerCase(Locale.ROOT);
         if ("register".equals(sub) || "status".equals(sub)) {
-            if (!sender.canCommandSenderUseCommand(2, getCommandName())) {
+            if (!isPrivileged(sender)) {
                 deny(sender);
                 return;
             }
@@ -78,6 +81,7 @@ public final class NodeCommand extends CommandBase {
     // ---------- 节点注册与状态 ----------
 
     private void register(final ICommandSender sender, String[] args) {
+        HorizonModServer.LOG.info("register 分支进入，参数个数 {}", args.length);
         if (args.length < 2) {
             sender.addChatMessage(new ChatComponentText(EnumChatFormatting.RED
                     + MainThreadQueue.line("用法：/dsmnhmobile register <注册码> [名称]")));
@@ -94,14 +98,13 @@ public final class NodeCommand extends CommandBase {
         });
     }
 
-    private void status(final ICommandSender sender) {
+    private void status(ICommandSender sender) {
         NodeClient node = HorizonModServer.INSTANCE.node();
-        if (node == null) {
-            reply(sender, "未连接：尚无节点凭证，先 /dsmnhmobile register <码>");
-            return;
-        }
-        reply(sender, "节点 " + node.nodeId() + (node.isAuthenticated()
-                ? "：已连接后端" : "：连接中/重连中"));
+        String text = node == null
+                ? "未连接：尚无节点凭证，先 /dsmnhmobile register <码>"
+                : "节点 " + node.nodeId() + (node.isAuthenticated() ? "：已连接后端" : "：连接中/重连中");
+        HorizonModServer.LOG.info("{}", text);
+        sender.addChatMessage(new ChatComponentText(MainThreadQueue.line(text)));
     }
 
     // ---------- 游戏内出码 ----------
@@ -240,6 +243,15 @@ public final class NodeCommand extends CommandBase {
 
     // ---------- 辅助 ----------
 
+    /**
+     * console/RCON 视为特权（Crucible 的 RCON sender 调 canCommandSenderUseCommand 会异常吞没，
+     * 不能用作判据）；游戏内玩家仍按权限 2 检查。命令方块不在 1.0 支持范围。
+     */
+    private boolean isPrivileged(ICommandSender sender) {
+        return !(sender instanceof EntityPlayer)
+                || sender.canCommandSenderUseCommand(2, getCommandName());
+    }
+
     private interface NodeCall {
         void run() throws Exception;
     }
@@ -263,6 +275,8 @@ public final class NodeCommand extends CommandBase {
     }
 
     private void reply(final ICommandSender sender, final String text) {
+        // 异步结果同时写日志：RCON 会话在命令同步返回后即关闭，仅回投聊天会丢失
+        HorizonModServer.LOG.info("{}", text);
         HorizonModServer.INSTANCE.queue().enqueue(new Runnable() {
             @Override
             public void run() {

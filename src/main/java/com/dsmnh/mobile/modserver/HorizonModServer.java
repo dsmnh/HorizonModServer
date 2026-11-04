@@ -74,17 +74,22 @@ public final class HorizonModServer {
         }
     }
 
-    /** 已持凭证时建立持久连接（服务启动或注册成功后调用）。 */
-    public synchronized void connect() {
-        if (node != null) {
-            node.close();
-        }
+    /** 注册用的临时连接配置：与持久连接同源（host/port 来自 cfg，缺省端口不参与）。 */
+    private NodeConfig configForRegistration() {
         NodeConfig config = NodeConfig.defaults(credentialFile.toPath());
         config.backendHost = backendHost;
         config.backendPort = backendPort;
         config.nodeName = nodeName;
         config.app = "HorizonModServer/" + Tags.VERSION;
-        node = new NodeClient(config, new NodeCredentialStore(credentialFile.toPath()));
+        return config;
+    }
+
+    /** 已持凭证时建立持久连接（服务启动或注册成功后调用）。 */
+    public synchronized void connect() {
+        if (node != null) {
+            node.close();
+        }
+        node = new NodeClient(configForRegistration(), new NodeCredentialStore(credentialFile.toPath()));
         node.listener(new NodeClient.Listener() {
             @Override
             public void onConnected(long nodeId) {
@@ -109,7 +114,8 @@ public final class HorizonModServer {
 
     /** 用注册码注册本子服（阻塞调用，须在后台线程执行；成功后自动连接）。 */
     public synchronized long register(String code, String name) throws Exception {
-        NodeClient registerClient = new NodeClient(NodeConfig.defaults(credentialFile.toPath()),
+        NodeConfig registerConfig = configForRegistration();
+        NodeClient registerClient = new NodeClient(registerConfig,
                 new NodeCredentialStore(credentialFile.toPath()));
         registerClient.listener(new NodeClient.Listener() {
             @Override
