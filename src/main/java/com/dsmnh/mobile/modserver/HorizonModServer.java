@@ -1,6 +1,7 @@
 package com.dsmnh.mobile.modserver;
 
 import com.dsmnh.mobile.modserver.node.NodeApi;
+import com.dsmnh.mobile.modserver.node.NodeJson;
 import com.dsmnh.mobile.modserver.node.NodeClient;
 import com.dsmnh.mobile.modserver.node.NodeConfig;
 import com.dsmnh.mobile.modserver.node.NodeCredentialStore;
@@ -12,6 +13,8 @@ import cpw.mods.fml.common.event.FMLServerStoppingEvent;
 import net.minecraftforge.common.config.Configuration;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+
+import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.File;
 
@@ -108,8 +111,90 @@ public final class HorizonModServer {
                 LOG.warn("节点凭证已失效（被撤销或版本不兼容），不再重连；"
                         + "重新接入请先删除 {} 后用新注册码 register", credentialFile.getName());
             }
+
+            @Override
+            public void onDownOp(String opId, String type, JsonNode p) {
+                handleDownOp(opId, type, p);
+            }
         });
         node.start();
+    }
+
+    /** 下行操作执行：op.set 必须在主线程改 OP 列表；ack/fail 经后台线程回报（契约 1.2.0）。 */
+    private void handleDownOp(final String opId, final String type, final JsonNode p) {
+        if (!"op.set".equals(type)) {
+            reportOpResult(opId, "unsupported type " + type);
+            return;
+        }
+        final String player = p.path("player").asText("");
+        final boolean grant = p.path("grant").asBoolean(false);
+        queue.enqueue(new Runnable() {
+            @Override
+            public void run() {
+                String error = applyOpSet(player, grant);
+                reportOpResult(opId, error);
+            }
+        });
+    }
+
+    /** 主线程执行 OP 变更；返回 null 表示成功，否则为失败原因。 */
+    private String applyOpSet(String player, boolean grant) {
+        cpw.mods.fml.common.FMLCommonHandler.instance();
+        net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
+        if (server == null || server.getConfigurationManager() == null) {
+            return "server not ready";
+        }
+        String name = resolveOnlineName(player);
+        if (name == null) {
+            return "player not online: " + player;
+        }
+        // 经控制台命令通道执行（name 来自在线玩家的 UUID 解析，无注入面）；
+        // GTNH 映射下 ServerConfigurationManager 无稳定的 addOp/removeOp 源码名
+        String command = (grant ? "op " : "deop ") + name;
+        int affected = server.getCommandManager().executeCommand(server, command);
+        if (affected <= 0) {
+            return "command had no effect: " + command;
+        }
+        LOG.info("{} OP：{}", grant ? "已授予" : "已撤销", name);
+        return null;
+    }
+
+    /** 阶段 1 仅解析在线玩家；离线解析留待玩家名上报落地。 */
+    private String resolveOnlineName(String playerUuid) {
+        net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
+        for (Object o : new java.util.ArrayList<Object>(
+                server.getConfigurationManager().playerEntityList)) {
+            net.minecraft.entity.player.EntityPlayer player =
+                    (net.minecraft.entity.player.EntityPlayer) o;
+            if (playerUuid.equals(player.getUniqueID().toString())) {
+                return player.getCommandSenderName();
+            }
+        }
+        return null;
+    }
+
+    private void reportOpResult(final String opId, final String error) {
+        final NodeClient current = node;
+        if (current == null) {
+            return;
+        }
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    com.fasterxml.jackson.databind.node.ObjectNode p = NodeJson.object();
+                    p.put("opId", opId);
+                    if (error == null) {
+                        current.req("node.op.ack", p);
+                    } else {
+                        p.put("reason", error);
+                        current.req("node.op.fail", p);
+                    }
+                } catch (Exception e) {
+                    LOG.warn("回报下行结果失败（后端将按退避重试）：{}", e.toString());
+                }
+            }
+        }, "dsmnhmobile-op-report").start();
     }
 
     /** 用注册码注册本子服（阻塞调用，须在后台线程执行；成功后自动连接）。 */

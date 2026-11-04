@@ -29,6 +29,9 @@ public final class NodeClient implements Closeable {
         default void onDisconnected(boolean willRetry) {}
 
         default void onRevoked() {}
+
+        /** 节点下行操作（契约 1.2.0）：执行后必须回报 node.op.ack 或 node.op.fail。 */
+        default void onDownOp(String opId, String type, JsonNode p) {}
     }
 
     /** 握手/致命错误：code 为 ERR.m 或 AUTH_FAIL.code。 */
@@ -309,6 +312,31 @@ public final class NodeClient implements Closeable {
         nodeId = credential.nodeId;
         authed = true;
         startPing();
+        subscribeOps();
+    }
+
+    /** 鉴权成功后订阅下行操作流；后端不支持时（UNKNOWN_OP）静默降级。 */
+    private void subscribeOps() {
+        long id = idGen.incrementAndGet();
+        CompletableFuture<JsonNode> future = new CompletableFuture<JsonNode>();
+        pending.put(id, future);
+        try {
+            ObjectNode request = NodeJson.object();
+            request.put("id", id);
+            request.put("op", "ops");
+            request.set("p", NodeJson.object());
+            send(NodeProtocol.T_SUB, NodeJson.write(request));
+        } catch (Exception e) {
+            pending.remove(id);
+            log("订阅下行流失败：" + e);
+            return;
+        }
+        future.whenComplete((res, err) -> {
+            pending.remove(id);
+            if (err != null) {
+                log("下行流订阅未确认（后端可能不支持）：err=" + err);
+            }
+        });
     }
 
     private void readLoop() throws IOException {
@@ -319,13 +347,14 @@ public final class NodeClient implements Closeable {
             }
             switch (frame.type) {
                 case NodeProtocol.T_RES:
+                case NodeProtocol.T_SUB_OK:
                     complete(NodeJson.read(frame.payload));
                     break;
                 case NodeProtocol.T_PING:
                     send(NodeProtocol.T_PONG, null);
                     break;
                 case NodeProtocol.T_PUSH:
-                    log("收到未订阅推送，忽略");
+                    dispatchPush(NodeJson.read(frame.payload));
                     break;
                 case NodeProtocol.T_ERR:
                     throw new NodeAuthException(NodeJson.strOf(NodeJson.read(frame.payload), "m", "ERR"));
@@ -333,6 +362,29 @@ public final class NodeClient implements Closeable {
                     break;
             }
         }
+    }
+
+    /** 解析推送帧：t=f 全量与 t=d 增量都逐条回调 onDownOp；t=k 心跳忽略。 */
+    private void dispatchPush(JsonNode push) {
+        JsonNode f = push.path("f");
+        String t = f.path("t").asText("");
+        if ("f".equals(t)) {
+            // 全量帧的 ops 元素不含 k 字段（登记表 §5.2），直接回调
+            for (JsonNode op : f.path("ops")) {
+                notifyOp(op);
+            }
+        } else if ("d".equals(t)) {
+            for (JsonNode event : f.path("events")) {
+                if ("op".equals(event.path("k").asText())) {
+                    notifyOp(event);
+                }
+            }
+        }
+    }
+
+    private void notifyOp(JsonNode event) {
+        listener.onDownOp(event.path("opId").asText(), event.path("type").asText(),
+                event.path("p"));
     }
 
     private void complete(JsonNode res) {
