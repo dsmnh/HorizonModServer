@@ -1,0 +1,14 @@
+// Horizon 节点客户端只需 Jackson（协议 JSON 载荷）；经 shadow 并入 mod jar。
+// 版本沿用 AEMobile 实测的本机 Gradle 缓存版本。
+dependencies {
+    shadowImplementation 'com.fasterxml.jackson.core:jackson-databind:2.13.5'
+}
+
+// 节点客户端核心的单测（GTNH 模板默认不配置测试任务，这里补上 JUnit 5）
+test {
+    useJUnitPlatform()
+}
+
+dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+}

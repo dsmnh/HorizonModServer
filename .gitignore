@@ -1,5 +1,11 @@
 target/
-*.json.local
+build/
+.gradle/
+run/
+*.db
+*.db-wal
+*.db-shm
+config.json
 dependency-reduced-pom.xml
 
 # 本地进度文档（不上传，规则见工作区 doc/AI协作.md）

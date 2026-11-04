@@ -1,0 +1,16 @@
+[
+    {
+      "modid": "${modId}",
+      "name": "${modName}",
+      "description": "Horizon server-side mod: connects the Minecraft server to the Horizon backend over the node plane (protocol 1.1.1)",
+      "version": "${modVersion}",
+      "mcversion": "${minecraftVersion}",
+      "url": "https://github.com/dsmnh",
+      "updateUrl": "",
+      "authorList": ["dsmnh"],
+      "credits": "",
+      "logoFile": "",
+      "screenshots": [],
+      "dependencies": []
+    }
+]
