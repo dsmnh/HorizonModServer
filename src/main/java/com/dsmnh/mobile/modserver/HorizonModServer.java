@@ -242,9 +242,7 @@ public final class HorizonModServer {
                     body.set("teams", SuAdapter.aggregateTeams(
                             net.minecraft.server.MinecraftServer.getServer()).get("teams"));
                     JsonNode res = current.req("team.report", body);
-                    LOG.info("队伍对账上报：{}", res.path("b").path("accepted").asBoolean() ? "已受理" : "被拒");
                 } catch (Exception e) {
-                    LOG.warn("队伍对账上报失败：{}", e.toString());
                 }
             }
         }, "dsmnhmobile-report").start();
