@@ -56,6 +56,33 @@ public final class HorizonModServer {
         queue = new MainThreadQueue();
         queue.register();
         MinecraftForge.EVENT_BUS.register(this);
+        tickMonitor.register();
+    }
+
+    private final TickMonitor tickMonitor = new TickMonitor();
+
+    /** metrics 上报循环（5s 一帧，契约 1.5.0 §8.6；节点连接后启动）。 */
+    private java.util.concurrent.ScheduledExecutorService metricsExecutor;
+
+    private void startMetricsLoop() {
+        if (metricsExecutor != null) return;
+        metricsExecutor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "dsmnhmobile-metrics");
+            t.setDaemon(true);
+            return t;
+        });
+        metricsExecutor.scheduleAtFixedRate(() -> {
+            NodeClient current = node;
+            if (current == null || !current.isAuthenticated()) return;
+            try {
+                ObjectNode frame = tickMonitor.snapshot();
+                if (frame != null) {
+                    current.req("metrics.report", frame);
+                }
+            } catch (Exception e) {
+                LOG.warn("metrics 上报失败：{}", e.toString());
+            }
+        }, 5, 5, java.util.concurrent.TimeUnit.SECONDS);
     }
 
     /**
@@ -105,6 +132,10 @@ public final class HorizonModServer {
 
     @Mod.EventHandler
     public void serverStopping(FMLServerStoppingEvent event) {
+        if (metricsExecutor != null) {
+            metricsExecutor.shutdownNow();
+            metricsExecutor = null;
+        }
         if (node != null) {
             node.close();
             node = null;
@@ -132,6 +163,7 @@ public final class HorizonModServer {
             public void onConnected(long nodeId) {
                 LOG.info("已连接 Horizon 后端（节点 {}）", nodeId);
                 reportTeams();
+                startMetricsLoop();
             }
 
             @Override
