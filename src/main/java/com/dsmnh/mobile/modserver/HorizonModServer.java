@@ -15,6 +15,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.File;
 
@@ -97,6 +98,7 @@ public final class HorizonModServer {
             @Override
             public void onConnected(long nodeId) {
                 LOG.info("已连接 Horizon 后端（节点 {}）", nodeId);
+                reportTeams();
             }
 
             @Override
@@ -122,6 +124,16 @@ public final class HorizonModServer {
 
     /** 下行操作执行：op.set 必须在主线程改 OP 列表；ack/fail 经后台线程回报（契约 1.2.0）。 */
     private void handleDownOp(final String opId, final String type, final JsonNode p) {
+        if ("team.apply".equals(type)) {
+            // SU 写入适配器未实现（只读聚合已就绪）：诚实 fail，后端按退避重试
+            reportOpResult(opId, "SU write adapter pending");
+            return;
+        }
+        if ("eu.join".equals(type)) {
+            // /gt global_energy_join 的参数格式未经真服验证，不盲执行
+            reportOpResult(opId, "eu.join command format requires verification");
+            return;
+        }
         if (!"op.set".equals(type)) {
             reportOpResult(opId, "unsupported type " + type);
             return;
@@ -216,6 +228,26 @@ public final class HorizonModServer {
         } finally {
             registerClient.close();
         }
+    }
+
+    /** 队伍对账上报（契约 1.3.0）：聚合本服 SU 队伍经 team.report 上交。 */
+    private void reportTeams() {
+        final NodeClient current = node;
+        if (current == null) return;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    ObjectNode body = NodeJson.object();
+                    body.set("teams", SuAdapter.aggregateTeams(
+                            net.minecraft.server.MinecraftServer.getServer()).get("teams"));
+                    JsonNode res = current.req("team.report", body);
+                    LOG.info("队伍对账上报：{}", res.path("b").path("accepted").asBoolean() ? "已受理" : "被拒");
+                } catch (Exception e) {
+                    LOG.warn("队伍对账上报失败：{}", e.toString());
+                }
+            }
+        }, "dsmnhmobile-report").start();
     }
 
     public NodeClient node() {
