@@ -6,6 +6,8 @@ import com.dsmnh.mobile.modserver.node.NodeClient;
 import com.dsmnh.mobile.modserver.node.NodeConfig;
 import com.dsmnh.mobile.modserver.node.NodeCredentialStore;
 import cpw.mods.fml.common.Mod;
+import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.event.ServerChatEvent;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
 import cpw.mods.fml.common.event.FMLServerStartedEvent;
 import cpw.mods.fml.common.event.FMLServerStartingEvent;
@@ -53,6 +55,37 @@ public final class HorizonModServer {
         credentialFile = new File(event.getModConfigurationDirectory(), "dsmnhmobile-node-credential.json");
         queue = new MainThreadQueue();
         queue.register();
+        MinecraftForge.EVENT_BUS.register(this);
+    }
+
+    /**
+     * 游戏内公屏 → 后端 chat.relay（契约 1.4.0）：有 chat 订阅时才投递（零闲时开销）。
+     * 仅玩家公屏（ServerChatEvent 不含命令与私聊）；判断在事件线程，投递异步，不阻塞聊天。
+     */
+    @cpw.mods.fml.common.eventhandler.SubscribeEvent
+    public void onServerChat(ServerChatEvent event) {
+        NodeClient current = node;
+        if (current == null || !current.isAuthenticated()) {
+            return;
+        }
+        final String from = event.player.getUniqueID().toString();
+        final String text = event.message;
+        final String srv = nodeName;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    com.fasterxml.jackson.databind.node.ObjectNode p = NodeJson.object();
+                    p.put("channel", "public");
+                    p.put("from", from);
+                    p.put("text", text);
+                    p.put("srv", srv);
+                    current.req("chat.relay", p);
+                } catch (Exception e) {
+                    LOG.warn("chat.relay 投递失败：{}", e.toString());
+                }
+            }
+        }, "dsmnhmobile-relay").start();
     }
 
     @Mod.EventHandler
@@ -151,7 +184,6 @@ public final class HorizonModServer {
 
     /** 主线程执行 OP 变更；返回 null 表示成功，否则为失败原因。 */
     private String applyOpSet(String player, boolean grant) {
-        cpw.mods.fml.common.FMLCommonHandler.instance();
         net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
         if (server == null || server.getConfigurationManager() == null) {
             return "server not ready";
