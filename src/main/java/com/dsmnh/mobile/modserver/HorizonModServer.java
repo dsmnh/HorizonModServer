@@ -190,8 +190,15 @@ public final class HorizonModServer {
     /** 下行操作执行：op.set 必须在主线程改 OP 列表；ack/fail 经后台线程回报（契约 1.2.0）。 */
     private void handleDownOp(final String opId, final String type, final JsonNode p) {
         if ("team.apply".equals(type)) {
-            // SU 写入适配器未实现（只读聚合已就绪）：诚实 fail，后端按退避重试
-            reportOpResult(opId, "SU write adapter pending");
+            // SU 写入：主线程执行（SU 非线程安全）；离线成员跳过并以 fail 回报（后端退避重试）
+            final JsonNode team = p.path("team");
+            final JsonNode relations = p.path("relations");
+            queue.enqueue(new Runnable() {
+                @Override
+                public void run() {
+                    reportOpResult(opId, SuAdapter.applyTeam(team, relations));
+                }
+            });
             return;
         }
         if ("eu.join".equals(type)) {

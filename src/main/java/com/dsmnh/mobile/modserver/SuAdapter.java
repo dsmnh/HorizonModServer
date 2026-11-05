@@ -1,34 +1,45 @@
 package com.dsmnh.mobile.modserver;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.server.MinecraftServer;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.UUID;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * ServerUtilities 只读适配器（反射）：按在线玩家聚合本服 SU 队伍结构，
- * 供 team.report 上报（契约 1.3.0）。移植自 AEMobileChat TeamInfo 的已验证反射链：
- * Universe.getNullable → getPlayer(sender) → hasTeam/team → getTitle/getHighestStatus。
- * 没装 ServerUtilities 时整体停用（available=false）。
+ * ServerUtilities 适配器（契约 1.3.0/1.5.0）。
+ *
+ * <p>反射链与 AEMobileChat TeamInfo 同源（Universe.getNullable → getPlayer → hasTeam/team）。
+ * 写路径（team.apply）：只做「在线玩家」的成员关系写入与新队伍创建（universe.addTeam 是公开 API）；
+ * 离线成员跳过并上报，等待后续对账——避免向 SU 持久化注入未经验证的离线玩家对象。
+ * 全部操作在主线程执行（SU 非线程安全）。
  */
 public final class SuAdapter {
     private static boolean checked;
     private static boolean available;
+    private static Object universe;
     private static Method mGetUniverse;
-    private static Method mGetPlayer;
-    private static Method mHasTeam;
-    private static Field fTeam;
+    private static Method mGetPlayerBySender;
+    private static Method mGetPlayerByUuid;
+    private static Method mGetTeams;
+    private static Method mAddTeam;
+    private static Method mGenerateTeamUid;
     private static Method mGetTitle;
-    private static Method mGetStatus;
-    private static Method mStatusName;
+    private static Method mSetTitle;
+    private static Method mSetStatus;
+    private static Method mGetOwner;
+    private static Method mGetMembers;
+    private static Method mGetName;
+    private static Method mMarkDirty;
+    private static Field fPlayerTeam;
+    private static Field fUniversePlayers;
 
     private SuAdapter() {}
 
@@ -44,86 +55,179 @@ public final class SuAdapter {
             Class<?> universe = Class.forName("serverutils.lib.data.Universe");
             Class<?> forgePlayer = Class.forName("serverutils.lib.data.ForgePlayer");
             Class<?> forgeTeam = Class.forName("serverutils.lib.data.ForgeTeam");
+            Class<?> teamType = Class.forName("serverutils.lib.data.TeamType");
             Class<?> status = Class.forName("serverutils.lib.EnumTeamStatus");
+
             mGetUniverse = universe.getMethod("getNullable");
-            mGetPlayer = universe.getMethod("getPlayer", net.minecraft.command.ICommandSender.class);
-            mHasTeam = forgePlayer.getMethod("hasTeam");
-            fTeam = forgePlayer.getField("team");
+            mGetPlayerBySender = universe.getMethod("getPlayer", net.minecraft.command.ICommandSender.class);
+            mGetPlayerByUuid = universe.getMethod("getPlayer", UUID.class);
+            mGetTeams = universe.getMethod("getTeams");
+            mAddTeam = universe.getMethod("addTeam", forgeTeam);
+            mGenerateTeamUid = universe.getMethod("generateTeamUID", short.class);
+            fUniversePlayers = universe.getField("players");
+            fPlayerTeam = forgePlayer.getField("team");
             mGetTitle = forgeTeam.getMethod("getTitle");
-            mGetStatus = forgeTeam.getMethod("getHighestStatus", forgePlayer);
-            mStatusName = status.getMethod("name");
+            mSetTitle = forgeTeam.getMethod("setTitle", String.class);
+            mSetStatus = forgeTeam.getMethod("setStatus", forgePlayer, status);
+            mGetOwner = forgeTeam.getMethod("getOwner");
+            mGetMembers = forgeTeam.getMethod("getMembers");
+            mGetName = forgePlayer.getMethod("getName");
             available = true;
-            HorizonModServer.LOG.info("已接上 ServerUtilities 团队（只读）");
+            HorizonModServer.LOG.info("已接上 ServerUtilities（读+受限写）");
         } catch (Throwable t) {
             available = false;
-            HorizonModServer.LOG.info("未发现 ServerUtilities，队伍同步上报停用");
+            HorizonModServer.LOG.info("未发现 ServerUtilities，队伍同步停用");
         }
     }
 
-    /** 聚合本服队伍：按在线玩家的 SU 团队归并（单人队无名时用简介后备，同 AEMobileChat）。 */
+    /** 主线程哨兵：SU 操作必须在服务器主线程。 */
+    public static boolean onMainThread() {
+        return net.minecraft.server.MinecraftServer.getServer().isServerStopped()
+                ? false
+                : net.minecraft.server.MinecraftServer.getServer().isServerRunning();
+    }
+
+    /** 聚合本服 SU 队伍全量（team.report 载荷）。只读。 */
     public static ObjectNode aggregateTeams(MinecraftServer server) {
         ObjectNode out = JsonNodeFactory.instance.objectNode();
         ArrayNode teams = out.putArray("teams");
         if (!available()) {
             return out;
         }
-        Map<String, ObjectNode> byName = new LinkedHashMap<>();
-        for (EntityPlayerMP player : onlinePlayers(server)) {
-            try {
-                Object universe = mGetUniverse.invoke(null);
-                if (universe == null) return out;
-                Object fp = mGetPlayer.invoke(universe, player);
-                if (fp == null) continue;
-                if (!Boolean.TRUE.equals(mHasTeam.invoke(fp))) continue;
-                Object team = fTeam.get(fp);
+        try {
+            Object u = mGetUniverse.invoke(null);
+            if (u == null) return out;
+            Object playersMap = fUniversePlayers.get(u);
+            if (!(playersMap instanceof Map)) return out;
+            Map<?, ?> players = (Map<?, ?>) playersMap;
+            Map<String, ObjectNode> byId = new java.util.LinkedHashMap<>();
+            for (Object fpObj : players.values()) {
+                Object team = fPlayerTeam.get(fpObj);
                 if (team == null) continue;
-                String name = plain(mGetTitle.invoke(team));
-                if (name.isEmpty()) continue;
-                String role = "member";
-                try {
-                    Object status = mGetStatus.invoke(team, fp);
-                    if (status != null) {
-                        String n = String.valueOf(mStatusName.invoke(status));
-                        if ("OWNER".equals(n)) role = "leader";
-                        else if ("MOD".equals(n)) role = "vice";
-                    }
-                } catch (Throwable ignored) {
-                    // 角色取不到按普通成员
-                }
-                ObjectNode node = byName.get(name);
+                String teamName = plain(mGetTitle.invoke(team));
+                if (teamName.isEmpty()) continue;
+                String teamId = String.valueOf(team.hashCode());
+                ObjectNode node = byId.get(teamId);
                 if (node == null) {
-                    node = JsonNodeFactory.instance.objectNode();
-                    node.put("name", name);
+                    node = byId.computeIfAbsent(teamId, k -> JsonNodeFactory.instance.objectNode());
+                    node.put("name", teamName);
                     node.putArray("members");
                     node.putArray("allies");
                     node.putArray("enemies");
-                    byName.put(name, node);
                 }
                 ObjectNode member = ((ArrayNode) node.get("members")).addObject();
-                member.put("uuid", player.getUniqueID().toString());
-                member.put("role", role);
-            } catch (Throwable ignored) {
-                // 单个玩家读取失败不阻断聚合
+                member.put("uuid", String.valueOf(mGetName == null
+                        ? fpObj.toString() : invokeName(fpObj)));
+                member.put("role", roleOf(team, fpObj));
             }
-        }
-        for (ObjectNode node : byName.values()) {
-            teams.add(node);
+            for (ObjectNode node : byId.values()) {
+                teams.add(node);
+            }
+        } catch (Throwable t) {
+            HorizonModServer.LOG.warn("聚合 SU 队伍失败：{}", t.toString());
         }
         return out;
     }
 
-    private static List<EntityPlayerMP> onlinePlayers(MinecraftServer server) {
-        List<EntityPlayerMP> players = new ArrayList<EntityPlayerMP>();
-        if (server != null && server.getConfigurationManager() != null
-                && server.getConfigurationManager().playerEntityList != null) {
-            for (Object o : new ArrayList<Object>(server.getConfigurationManager().playerEntityList)) {
-                players.add((EntityPlayerMP) o);
-            }
+    private static String invokeName(Object fpObj) throws Exception {
+        if (mGetName != null) {
+            return String.valueOf(mGetName.invoke(fpObj));
         }
-        return players;
+        return fpObj.toString();
     }
 
-    /** IChatComponent → 纯文本；SRG 名 func_150260_c 必须一起试（AEMobileChat 已验证的坑）。 */
+    private static String roleOf(Object team, Object fpObj) {
+        try {
+            Object owner = mGetOwner.invoke(team);
+            if (fpObj.equals(owner)) return "leader";
+            List<?> members = (List<?>) mGetMembers.invoke(team);
+            for (Object m : members) {
+                if (m.equals(fpObj)) return "member";
+            }
+        } catch (Throwable ignored) {
+        }
+        return "member";
+    }
+
+    /**
+     * team.apply 执行（主线程调用）：按中央结构写入 SU。
+     * 返回 null=成功；否则失败原因（离线成员跳过时返回 "offline members skipped: n"）。
+     */
+    public static String applyTeam(JsonNode team, JsonNode relations) {
+        if (!available()) {
+            return "ServerUtilities not installed";
+        }
+        try {
+            Object u = mGetUniverse.invoke(null);
+            if (u == null) return "universe unavailable";
+            String name = team.path("name").asText("");
+            if (name.isEmpty()) return "team name empty";
+
+            Object existing = findTeamByName(u, name);
+            Object teamObj;
+            if (existing != null) {
+                teamObj = existing;
+            } else {
+                short uid = (Short) mGenerateTeamUid.invoke(u, (short) 0);
+                Class<?> teamType = Class.forName("serverutils.lib.data.TeamType");
+                Object playerType = null;
+                for (Object constant : teamType.getEnumConstants()) {
+                    if ("PLAYER".equals(String.valueOf(constant))) {
+                        playerType = constant;
+                    }
+                }
+                teamObj = Class.forName("serverutils.lib.data.ForgeTeam")
+                        .getConstructor(u.getClass(), short.class, String.class, teamType)
+                        .newInstance(u, uid, name, playerType);
+                mSetTitle.invoke(teamObj, name);
+                mAddTeam.invoke(u, teamObj);
+            }
+
+            int offline = 0;
+            for (JsonNode member : team.path("members")) {
+                String uuid = member.path("uuid").asText();
+                String role = member.path("role").asText("member");
+                Object fp = mGetPlayerByUuid.invoke(u, java.util.UUID.fromString(uuid));
+                if (fp == null) {
+                    offline += 1;
+                    continue;
+                }
+                fPlayerTeam.set(fp, teamObj);
+                Object status = Class.forName("serverutils.lib.EnumTeamStatus")
+                        .getMethod("valueOf", String.class)
+                        .invoke(null, "leader".equals(role) ? "OWNER" : "vice".equals(role) ? "MOD" : "MEMBER");
+                mSetStatus.invoke(teamObj, fp, status);
+            }
+            if (offline > 0) {
+                return "offline members skipped: " + offline;
+            }
+            markDirty(u);
+            return null;
+        } catch (Throwable t) {
+            return "apply error: " + t;
+        }
+    }
+
+    private static Object findTeamByName(Object universe, String name) throws Exception {
+        for (Object team : (Iterable<?>) mGetTeams.invoke(universe)) {
+            String title = plain(mGetTitle.invoke(team));
+            if (name.equals(title)) {
+                return team;
+            }
+        }
+        return null;
+    }
+
+    private static void markDirty(Object universe) {
+        try {
+            if (mMarkDirty == null) {
+                mMarkDirty = universe.getClass().getMethod("markDirty");
+            }
+            mMarkDirty.invoke(universe);
+        } catch (Throwable ignored) {
+        }
+    }
+
     private static String plain(Object component) {
         if (component == null) return "";
         if (component instanceof String) return clean((String) component);
@@ -133,7 +237,6 @@ public final class SuAdapter {
                 Object v = m.invoke(component);
                 if (v != null) return clean(String.valueOf(v));
             } catch (Throwable ignored) {
-                // 换下一个名字
             }
         }
         return "";
