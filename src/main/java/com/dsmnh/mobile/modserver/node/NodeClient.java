@@ -315,7 +315,15 @@ public final class NodeClient implements Closeable {
         subscribeOps();
     }
 
-    /** 鉴权成功后订阅下行操作流；后端不支持时（UNKNOWN_OP）静默降级。 */
+    /** chat 流消息监听器（由主类设置，处理游戏内公屏显示）。 */
+    private volatile java.util.function.BiConsumer<String, JsonNode> chatListener;
+
+    /** 设置 chat 流消息监听器（回调参数：from uuid, 完整事件节点）。 */
+    public void setChatListener(java.util.function.BiConsumer<String, JsonNode> listener) {
+        this.chatListener = listener;
+    }
+
+    /** 鉴权成功后订阅 ops 流 + chat 流；后端不支持时（UNKNOWN_OP）静默降级。 */
     private void subscribeOps() {
         long id = idGen.incrementAndGet();
         CompletableFuture<JsonNode> future = new CompletableFuture<JsonNode>();
@@ -335,6 +343,27 @@ public final class NodeClient implements Closeable {
             pending.remove(id);
             if (err != null) {
                 log("下行流订阅未确认（后端可能不支持）：err=" + err);
+            }
+        });
+        // chat 流订阅（1.4.0）
+        long chatId = idGen.incrementAndGet();
+        CompletableFuture<JsonNode> chatFuture = new CompletableFuture<JsonNode>();
+        pending.put(chatId, chatFuture);
+        try {
+            ObjectNode chatReq = NodeJson.object();
+            chatReq.put("id", chatId);
+            chatReq.put("op", "chat");
+            chatReq.set("p", NodeJson.object());
+            send(NodeProtocol.T_SUB, NodeJson.write(chatReq));
+        } catch (Exception e) {
+            pending.remove(chatId);
+            log("chat 流订阅失败：" + e);
+            return;
+        }
+        chatFuture.whenComplete((res, err) -> {
+            pending.remove(chatId);
+            if (err != null) {
+                log("chat 流订阅未确认：err=" + err);
             }
         });
     }
@@ -364,7 +393,7 @@ public final class NodeClient implements Closeable {
         }
     }
 
-    /** 解析推送帧：t=f 全量与 t=d 增量都逐条回调 onDownOp；t=k 心跳忽略。 */
+    /** 解析推送帧：t=f 全量与 t=d 增量分派到 ops 或 chat 回调；t=k 心跳忽略。 */
     private void dispatchPush(JsonNode push) {
         JsonNode f = push.path("f");
         String t = f.path("t").asText("");
@@ -375,8 +404,14 @@ public final class NodeClient implements Closeable {
             }
         } else if ("d".equals(t)) {
             for (JsonNode event : f.path("events")) {
-                if ("op".equals(event.path("k").asText())) {
+                String k = event.path("k").asText();
+                if ("op".equals(k)) {
                     notifyOp(event);
+                } else if ("msg".equals(k)) {
+                    java.util.function.BiConsumer<String, JsonNode> cl = chatListener;
+                    if (cl != null) {
+                        cl.accept(event.path("from").asText(), event);
+                    }
                 }
             }
         }
