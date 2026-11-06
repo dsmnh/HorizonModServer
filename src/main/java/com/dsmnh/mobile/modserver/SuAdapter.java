@@ -150,6 +150,53 @@ public final class SuAdapter {
     }
 
     /**
+     * rankings.report 数据源（契约 1.5.0 §8.6）：读取 SU Leaderboard 数据。
+     * 反射 ServerUtilitiesLeaderboards.LEADERBOARDS（static Map），
+     * 对每个 Leaderboard 遍历 Universe.getPlayers() 调 createValue。
+     * 主线程调用（SU 非线程安全）。
+     */
+    public static ObjectNode rankingsData() {
+        ObjectNode out = JsonNodeFactory.instance.objectNode();
+        ArrayNode boards = out.putArray("boards");
+        if (!available()) return out;
+        try {
+            Class<?> lbClass = Class.forName("serverutils.ServerUtilitiesLeaderboards");
+            Field lbField = lbClass.getField("LEADERBOARDS");
+            Map<?, ?> leaderboards = (Map<?, ?>) lbField.get(null);
+            Object u = mGetUniverse.invoke(null);
+            if (u == null) return out;
+            Method getPlayers = u.getClass().getMethod("getPlayers");
+            List<?> allPlayers = (List<?>) getPlayers.invoke(u);
+            for (Map.Entry<?, ?> entry : leaderboards.entrySet()) {
+                Object lb = entry.getValue();
+                String lbName = plain(mGetTitle.invoke(lb));
+                ObjectNode board = boards.addObject();
+                board.put("id", entry.getKey().toString());
+                board.put("name", lbName);
+                ArrayNode rows = board.putArray("rows");
+                for (Object fpObj : allPlayers) {
+                    try {
+                        Method createValue = lb.getClass().getMethod("createValue",
+                                Class.forName("serverutils.lib.data.ForgePlayer"));
+                        Object value = createValue.invoke(lb, fpObj);
+                        String text = plain(value);
+                        String uuid = String.valueOf(
+                                fpObj.getClass().getMethod("getId").invoke(fpObj));
+                        ObjectNode r = rows.addObject();
+                        r.put("uuid", uuid);
+                        r.put("value", text);
+                    } catch (Throwable ignored) {
+                        // 单个玩家读取失败不阻断
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            HorizonModServer.LOG.warn("rankings 数据读取失败：{}", t.toString());
+        }
+        return out;
+    }
+
+    /**
      * team.apply 执行（主线程调用）：按中央结构写入 SU。
      * 返回 null=成功；否则失败原因（离线成员跳过时返回 "offline members skipped: n"）。
      */

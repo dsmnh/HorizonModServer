@@ -83,6 +83,28 @@ public final class HorizonModServer {
                 LOG.warn("metrics 上报失败：{}", e.toString());
             }
         }, 5, 5, java.util.concurrent.TimeUnit.SECONDS);
+        // rankings 上报循环（每小时一次，契约 1.5.0 §8.6）
+        final java.util.concurrent.atomic.AtomicInteger rankCounter =
+                new java.util.concurrent.atomic.AtomicInteger();
+        metricsExecutor.scheduleAtFixedRate(() -> {
+            if (rankCounter.incrementAndGet() % 12 != 1) return; // 12×5s = 60s 一次
+            NodeClient current = node;
+            if (current == null || !current.isAuthenticated()) return;
+            // SU 数据读取需主线程——先在主线程聚合，再在后台线程发送
+            queue.enqueue(() -> {
+                ObjectNode rankings = SuAdapter.rankingsData();
+                if (rankings.path("boards").size() == 0) return;
+                new Thread(() -> {
+                    try {
+                        ObjectNode p = NodeJson.object();
+                        p.set("boards", rankings.get("boards"));
+                        current.req("rankings.report", p);
+                    } catch (Exception e) {
+                        LOG.warn("rankings 上报失败：{}", e.toString());
+                    }
+                }, "dsmnhmobile-rank").start();
+            });
+        }, 30, 60, java.util.concurrent.TimeUnit.SECONDS);
     }
 
     /**
