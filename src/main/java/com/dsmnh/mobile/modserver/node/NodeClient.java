@@ -32,6 +32,9 @@ public final class NodeClient implements Closeable {
 
         /** 节点下行操作（契约 1.2.0）：执行后必须回报 node.op.ack 或 node.op.fail。 */
         default void onDownOp(String opId, String type, JsonNode p) {}
+
+        /** chat 流消息（契约 1.4.0）：App 公聊→游戏内显示。 */
+        default void onChatMessage(String from, JsonNode event) {}
     }
 
     /** 握手/致命错误：code 为 ERR.m 或 AUTH_FAIL.code。 */
@@ -313,18 +316,34 @@ public final class NodeClient implements Closeable {
         authed = true;
         startPing();
         subscribeOps();
+        subscribeChat();
     }
 
-    /** chat 流消息监听器（由主类设置，处理游戏内公屏显示）。 */
-    private volatile java.util.function.BiConsumer<String, JsonNode> chatListener;
-
-    /** 设置 chat 流消息监听器（回调参数：from uuid, 完整事件节点）。 */
-    public void setChatListener(java.util.function.BiConsumer<String, JsonNode> listener) {
-        this.chatListener = listener;
-    }
-
-    /** 鉴权成功后订阅 ops 流 + chat 流；后端不支持时（UNKNOWN_OP）静默降级。 */
+    /** 鉴权成功后订阅 ops 流；后端不支持时（UNKNOWN_OP）静默降级。 */
     private void subscribeOps() {
+        long id = idGen.incrementAndGet();
+        CompletableFuture<JsonNode> future = new CompletableFuture<JsonNode>();
+        pending.put(id, future);
+        try {
+            ObjectNode request = NodeJson.object();
+            request.put("id", id);
+            request.put("op", "ops");
+            request.set("p", NodeJson.object());
+            send(NodeProtocol.T_SUB, NodeJson.write(request));
+        } catch (Exception e) {
+            pending.remove(id);
+            log("订阅下行流失败：" + e);
+            return;
+        }
+        future.whenComplete((res, err) -> {
+            pending.remove(id);
+            if (err != null) {
+                log("下行流订阅未确认（后端可能不支持）：err=" + err);
+            }
+        });
+    }
+
+    private void subscribeChat() {
         long id = idGen.incrementAndGet();
         CompletableFuture<JsonNode> future = new CompletableFuture<JsonNode>();
         pending.put(id, future);
@@ -408,10 +427,7 @@ public final class NodeClient implements Closeable {
                 if ("op".equals(k)) {
                     notifyOp(event);
                 } else if ("msg".equals(k)) {
-                    java.util.function.BiConsumer<String, JsonNode> cl = chatListener;
-                    if (cl != null) {
-                        cl.accept(event.path("from").asText(), event);
-                    }
+                    listener.onChatMessage(event.path("from").asText(), event);
                 }
             }
         }

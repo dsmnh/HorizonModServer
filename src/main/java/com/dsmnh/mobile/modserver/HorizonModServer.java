@@ -167,6 +167,21 @@ public final class HorizonModServer {
             }
 
             @Override
+            public void onChatMessage(String from, com.fasterxml.jackson.databind.JsonNode event) {
+                // chat 流下行：App 公聊→游戏内显示（契约 1.4.0）。主线程投递。
+                String text = event.path("text").asText();
+                String srv = event.path("srv").asText("");
+                queue.enqueue(() -> {
+                    net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
+                    if (server != null && server.getConfigurationManager() != null) {
+                        String display = "§b[Horizon]§r " + (srv.isEmpty() ? "" : "§7[" + srv + "]§r ") + text;
+                        server.getConfigurationManager().sendChatMsg(
+                                new net.minecraft.util.ChatComponentText(display));
+                    }
+                });
+            }
+
+            @Override
             public void onDisconnected(boolean willRetry) {
                 if (willRetry) {
                     LOG.info("与后端断开，按退避自动重连");
