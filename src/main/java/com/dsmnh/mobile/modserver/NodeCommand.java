@@ -78,6 +78,7 @@ public final class NodeCommand extends CommandBase {
                 EnumChatFormatting.RED + MainThreadQueue.line(getCommandUsage(sender))));
     }
 
+
     // ---------- 节点注册与状态 ----------
 
     private void register(final ICommandSender sender, String[] args) {
