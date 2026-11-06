@@ -230,7 +230,7 @@ public final class NodeCommand extends CommandBase {
                     + MainThreadQueue.line("未知子命令：team " + action)));
             return;
         }
-        final String op = "team." + action;
+        final String op = contractOp(action);
         async(sender, new NodeCall() {
             @Override
             public void run() throws Exception {
@@ -240,6 +240,23 @@ public final class NodeCommand extends CommandBase {
                         ? "" : "：" + b.toString()));
             }
         });
+    }
+
+    /**
+     * 命令子命令 → 契约 1.5.0 op 名（登记表 §team 域）。
+     * 子命令面向玩家习惯（短词），契约 op 名为 acceptInvite/approveApply/setRole/setJoinMode 等——
+     * 直接 "team."+action 拼接会产生未登记 op（后端 UNKNOWN_OP），必须映射。
+     */
+    private static String contractOp(String action) {
+        switch (action) {
+            case "accept": return "team.acceptInvite";
+            case "decline": return "team.declineInvite";
+            case "approve": return "team.approveApply";
+            case "deny": return "team.denyApply";
+            case "setrole": return "team.setRole";
+            case "joinmode": return "team.setJoinMode";
+            default: return "team." + action; // create/disband/info/list/leave/invite/kick/transfer/apply 与契约同名
+        }
     }
 
     // ---------- 辅助 ----------
