@@ -30,7 +30,8 @@ public final class NodeCommand extends CommandBase {
     @Override
     public String getCommandUsage(ICommandSender sender) {
         return "/dsmnhmobile register <码> [名称] | status | bind | recover"
-                + " | team <create|leave|disband|info|list|invite|accept|decline|apply|approve|deny|kick|transfer|setrole|joinmode> …";
+                + " | team <create|leave|disband|info|list|invite|accept|decline|apply|approve|deny|kick|transfer|setrole|joinmode> …"
+                + " | me <register|unregister|list> [deviceId]";
     }
 
     @Override
@@ -72,6 +73,10 @@ public final class NodeCommand extends CommandBase {
         }
         if ("team".equals(sub)) {
             team(sender, args);
+            return;
+        }
+        if ("me".equals(sub)) {
+            me(sender, args);
             return;
         }
         sender.addChatMessage(new ChatComponentText(
@@ -256,6 +261,74 @@ public final class NodeCommand extends CommandBase {
             case "setrole": return "team.setRole";
             case "joinmode": return "team.setJoinMode";
             default: return "team." + action; // create/disband/info/list/leave/invite/kick/transfer/apply 与契约同名
+        }
+    }
+
+    // ---------- ME 设备登记 ----------
+
+    /** 设备坐标取登记者所在位置，供节点侧 me.query 定位 AE2 网格方块。 */
+    private void me(final ICommandSender sender, String[] args) {
+        if (args.length < 2) {
+            usage(sender, "/dsmnhmobile me <register|unregister|list> [deviceId]");
+            return;
+        }
+        final String action = args[1].toLowerCase(Locale.ROOT);
+        if ("list".equals(action)) {
+            StringBuilder sb = new StringBuilder("本服已登记 ME 设备：");
+            for (MeAdapter.Device device : MeAdapter.devices()) {
+                sb.append(device.deviceId).append("(").append(device.dim).append(":")
+                        .append(device.x).append(",").append(device.y).append(",")
+                        .append(device.z).append(") ");
+            }
+            sender.addChatMessage(new ChatComponentText(MainThreadQueue.line(sb.toString())));
+            return;
+        }
+        final EntityPlayer player = requirePlayer(sender);
+        if (player == null) {
+            return;
+        }
+        final String deviceId;
+        if (args.length > 2) {
+            deviceId = args[2];
+        } else if ("register".equals(action)) {
+            deviceId = "me-" + player.getUniqueID().toString().replace("-", "").substring(0, 12);
+        } else {
+            usage(sender, "/dsmnhmobile me " + action + " <deviceId>");
+            return;
+        }
+        if ("register".equals(action)) {
+            final int dim = player.dimension;
+            final int x = (int) Math.floor(player.posX);
+            final int y = (int) Math.floor(player.posY);
+            final int z = (int) Math.floor(player.posZ);
+            final String owner = player.getUniqueID().toString();
+            MeAdapter.register(deviceId, dim, x, y, z, owner, "monitor");
+            async(sender, new NodeCall() {
+                @Override
+                public void run() throws Exception {
+                    if (HorizonModServer.INSTANCE.api() == null) {
+                        reply(sender, "节点未连接后端；设备仅在本服本地登记");
+                        return;
+                    }
+                    HorizonModServer.INSTANCE.api().meRegister(deviceId, owner, "monitor");
+                    reply(sender, "已登记 ME 设备 " + deviceId + " 并上报后端");
+                }
+            });
+        } else if ("unregister".equals(action)) {
+            MeAdapter.unregister(deviceId);
+            async(sender, new NodeCall() {
+                @Override
+                public void run() throws Exception {
+                    if (HorizonModServer.INSTANCE.api() == null) {
+                        reply(sender, "节点未连接后端；设备已从本服本地移除");
+                        return;
+                    }
+                    HorizonModServer.INSTANCE.api().meUnregister(deviceId);
+                    reply(sender, "已注销 ME 设备 " + deviceId);
+                }
+            });
+        } else {
+            usage(sender, "/dsmnhmobile me <register|unregister|list> [deviceId]");
         }
     }
 

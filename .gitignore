@@ -2,6 +2,7 @@ target/
 build/
 .gradle/
 run/
+logs/
 *.db
 *.db-wal
 *.db-shm

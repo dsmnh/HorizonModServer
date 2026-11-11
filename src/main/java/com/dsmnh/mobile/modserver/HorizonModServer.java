@@ -17,14 +17,15 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.File;
 
 /**
- * Horizon 服务端模组：把本子服接入 Horizon 后端节点平面（协议 1.1.1）。
- * 阶段 1 范围：节点注册、游戏内出码（绑定/恢复）、队伍域代调用；
- * 不含聊天/ME/TPS（阶段 3/5/6，见企划书 08）。
+ * Horizon 服务端模组：把本子服接入 Horizon 后端节点平面（协议 1.6.0）。
+ * 覆盖节点注册、登记表 §6 六类下行操作、监控与在线玩家名上报；
+ * 游戏侧读写统一经 MainThreadQueue 回到主线程。
  */
 @Mod(modid = Tags.MODID, name = Tags.MODNAME, version = Tags.VERSION,
         acceptedMinecraftVersions = "[1.7.10]")
@@ -37,6 +38,7 @@ public final class HorizonModServer {
     private String backendHost;
     private int backendPort;
     private String nodeName;
+    private String euJoinTemplate;
     private File credentialFile;
 
     @Mod.EventHandler
@@ -49,10 +51,13 @@ public final class HorizonModServer {
                 "Horizon 后端节点平面端口").getInt();
         nodeName = config.get("node", "nodeName", "",
                 "注册时自报名称（仅展示用）").getString();
+        euJoinTemplate = config.get("node", "euJoinTemplate", EuJoinTemplate.DEFAULT,
+                "eu.join 命令模板，占位符 {player}/{team}").getString();
         if (config.hasChanged()) {
             config.save();
         }
         credentialFile = new File(event.getModConfigurationDirectory(), "dsmnhmobile-node-credential.json");
+        BqAdapter.setBackupDir(event.getModConfigurationDirectory());
         queue = new MainThreadQueue();
         queue.register();
         MinecraftForge.EVENT_BUS.register(this);
@@ -137,6 +142,40 @@ public final class HorizonModServer {
         }, "dsmnhmobile-relay").start();
     }
 
+    /** 在线玩家集合变化即重新上报，使后端 player_names 与账号/队伍展示保持同步。 */
+    @cpw.mods.fml.common.eventhandler.SubscribeEvent
+    public void onPlayerLoggedIn(cpw.mods.fml.common.gameevent.PlayerEvent.PlayerLoggedInEvent event) {
+        reportPlayerNames(null);
+    }
+
+    @cpw.mods.fml.common.eventhandler.SubscribeEvent
+    public void onPlayerLoggedOut(cpw.mods.fml.common.gameevent.PlayerEvent.PlayerLoggedOutEvent event) {
+        reportPlayerNames(event.player.getUniqueID().toString());
+    }
+
+    /** 主线程采集玩家名，后台线程上报；excludeUuid 用于排除刚离线的玩家。 */
+    private void reportPlayerNames(final String excludeUuid) {
+        queue.enqueue(new Runnable() {
+            @Override
+            public void run() {
+                final ArrayNode players = PlayerNames.snapshot(excludeUuid);
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            NodeApi api = api();
+                            if (api != null) {
+                                api.playerNamesReport(players);
+                            }
+                        } catch (Exception e) {
+                            LOG.warn("玩家名上报失败：{}", e.toString());
+                        }
+                    }
+                }, "dsmnhmobile-names").start();
+            }
+        });
+    }
+
     @Mod.EventHandler
     public void serverStarting(FMLServerStartingEvent event) {
         event.registerServerCommand(new NodeCommand());
@@ -185,6 +224,7 @@ public final class HorizonModServer {
             public void onConnected(long nodeId) {
                 LOG.info("已连接 Horizon 后端（节点 {}）", nodeId);
                 reportTeams();
+                reportPlayerNames(null);
                 startMetricsLoop();
             }
 
@@ -224,38 +264,182 @@ public final class HorizonModServer {
         node.start();
     }
 
-    /** 下行操作执行：op.set 必须在主线程改 OP 列表；ack/fail 经后台线程回报（契约 1.2.0）。 */
+    /** 下行操作执行（登记表 §6）：六类均有执行分支；游戏侧读写统一回主线程。 */
     private void handleDownOp(final String opId, final String type, final JsonNode p) {
-        if ("team.apply".equals(type)) {
-            // SU 写入：主线程执行（SU 非线程安全）；离线成员跳过并以 fail 回报（后端退避重试）
-            final JsonNode team = p.path("team");
-            final JsonNode relations = p.path("relations");
-            queue.enqueue(new Runnable() {
-                @Override
-                public void run() {
-                    reportOpResult(opId, SuAdapter.applyTeam(team, relations));
-                }
-            });
-            return;
+        final String phase = p.path("phase").asText("");
+        switch (DownOpRouter.route(type, phase)) {
+            case TEAM_APPLY: {
+                final JsonNode team = p.path("team");
+                final JsonNode relations = p.path("relations");
+                queue.enqueue(new Runnable() {
+                    @Override
+                    public void run() {
+                        reportOpResult(opId, SuAdapter.applyTeam(team, relations));
+                    }
+                });
+                return;
+            }
+            case OP_SET: {
+                final String player = p.path("player").asText("");
+                final boolean grant = p.path("grant").asBoolean(false);
+                queue.enqueue(new Runnable() {
+                    @Override
+                    public void run() {
+                        reportOpResult(opId, applyOpSet(player, grant));
+                    }
+                });
+                return;
+            }
+            case EU_JOIN: {
+                queue.enqueue(new Runnable() {
+                    @Override
+                    public void run() {
+                        reportOpResult(opId, applyEuJoin(p));
+                    }
+                });
+                return;
+            }
+            case RANKINGS_APPLY: {
+                final JsonNode boards = p.path("boards");
+                queue.enqueue(new Runnable() {
+                    @Override
+                    public void run() {
+                        reportOpResult(opId, RankingsAdapter.applyBoards(boards));
+                    }
+                });
+                return;
+            }
+            case BQ_EXPORT:
+                handleBqExport(opId, p);
+                return;
+            case BQ_IMPORT:
+                handleBqImport(opId, p);
+                return;
+            case ME_QUERY:
+                handleMeQuery(opId, p);
+                return;
+            default:
+                reportOpResult(opId, DownOpRouter.rejectReason(type, phase));
         }
-        if ("eu.join".equals(type)) {
-            // /gt global_energy_join 的参数格式未经真服验证，不盲执行
-            reportOpResult(opId, "eu.join command format requires verification");
-            return;
+    }
+
+    /** eu.join：按配置模板执行 GTNH 官方无线 EU 命令（契约 §8.2）。 */
+    private String applyEuJoin(JsonNode p) {
+        String player = p.path("player").asText("");
+        String team = p.path("teamName").asText("");
+        if (player.isEmpty() || team.isEmpty()) {
+            return "eu.join 缺少 player/teamName";
         }
-        if (!"op.set".equals(type)) {
-            reportOpResult(opId, "unsupported type " + type);
-            return;
+        String command = EuJoinTemplate.render(euJoinTemplate, player, team);
+        if (command.startsWith("/")) {
+            command = command.substring(1);
         }
-        final String player = p.path("player").asText("");
-        final boolean grant = p.path("grant").asBoolean(false);
+        net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
+        if (server == null) {
+            return "server not ready";
+        }
+        int affected = server.getCommandManager().executeCommand(server, command);
+        return affected <= 0 ? "eu.join 命令无效：" + command : null;
+    }
+
+    /** BQ 导出阶段：主线程生成快照，后台经 bq.snapshot.put 回传后回报 ack/fail。 */
+    private void handleBqExport(final String opId, final JsonNode p) {
         queue.enqueue(new Runnable() {
             @Override
             public void run() {
-                String error = applyOpSet(player, grant);
-                reportOpResult(opId, error);
+                final ObjectNode snapshot = BqAdapter.exportSnapshot(p);
+                final String snapshotId = p.path("snapshotId").asText("");
+                final String batchId = p.path("batchId").asText("");
+                if (snapshotId.isEmpty() || batchId.isEmpty()) {
+                    reportOpResult(opId, "bq.apply export 缺少 snapshotId/batchId");
+                    return;
+                }
+                nodeCall(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            NodeApi api = api();
+                            if (api == null) {
+                                reportOpResult(opId, "节点未连接");
+                                return;
+                            }
+                            api.bqSnapshotPut(snapshotId, batchId, snapshot);
+                            reportOpResult(opId, null);
+                        } catch (Exception e) {
+                            reportOpResult(opId, "bq 快照回传失败：" + e);
+                        }
+                    }
+                });
             }
         });
+    }
+
+    /** BQ 导入阶段：后台拉取快照，主线程备份并覆盖写回；失败不自动重试（契约 §8.4）。 */
+    private void handleBqImport(final String opId, final JsonNode p) {
+        final String snapshotId = p.path("snapshotId").asText("");
+        if (snapshotId.isEmpty()) {
+            reportOpResult(opId, "bq.apply import 缺少 snapshotId");
+            return;
+        }
+        nodeCall(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    NodeApi api = api();
+                    if (api == null) {
+                        reportOpResult(opId, "节点未连接");
+                        return;
+                    }
+                    final JsonNode payload = api.bqSnapshotGet(snapshotId).path("payload");
+                    queue.enqueue(new Runnable() {
+                        @Override
+                        public void run() {
+                            reportOpResult(opId, BqAdapter.importSnapshot(payload));
+                        }
+                    });
+                } catch (Exception e) {
+                    reportOpResult(opId, "bq 快照拉取失败：" + e);
+                }
+            }
+        });
+    }
+
+    /** me.query：主线程执行 AE2 查询，后台经 me.query.result 回填，随后 ack。 */
+    private void handleMeQuery(final String opId, final JsonNode p) {
+        final String deviceId = p.path("deviceId").asText("");
+        final String queryId = p.path("queryId").asText("");
+        if (deviceId.isEmpty() || queryId.isEmpty()) {
+            reportOpResult(opId, "me.query 缺少 deviceId/queryId");
+            return;
+        }
+        queue.enqueue(new Runnable() {
+            @Override
+            public void run() {
+                final ObjectNode result = MeAdapter.query(deviceId);
+                nodeCall(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            NodeApi api = api();
+                            if (api == null) {
+                                reportOpResult(opId, "节点未连接");
+                                return;
+                            }
+                            api.meQueryResult(queryId, (ArrayNode) result.get("items"),
+                                    result.path("error").asText(null));
+                            reportOpResult(opId, null);
+                        } catch (Exception e) {
+                            reportOpResult(opId, "me.query 结果回填失败：" + e);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /** 阻塞式节点请求统一在后台线程执行，避免占用主线程。 */
+    private void nodeCall(Runnable call) {
+        new Thread(call, "dsmnhmobile-node-call").start();
     }
 
     /** 主线程执行 OP 变更；返回 null 表示成功，否则为失败原因。 */

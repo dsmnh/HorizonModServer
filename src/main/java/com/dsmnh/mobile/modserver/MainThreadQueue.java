@@ -6,6 +6,8 @@ import cpw.mods.fml.common.gameevent.TickEvent;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ChatComponentText;
 import net.minecraft.util.EnumChatFormatting;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.concurrent.ConcurrentLinkedQueue;
 
@@ -14,6 +16,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * 每 tick 8ms 预算（1.7.10 无 addScheduledTask，沿用 AEMobile 已验证模式，企划书 02/09）。
  */
 public final class MainThreadQueue {
+    private static final Logger LOG = LogManager.getLogger("dsmnhmobile");
     private static final long BUDGET_NS = 8_000_000L;
     private final ConcurrentLinkedQueue<Runnable> tasks = new ConcurrentLinkedQueue<Runnable>();
 
@@ -43,11 +46,21 @@ public final class MainThreadQueue {
         long deadline = System.nanoTime() + BUDGET_NS;
         Runnable task;
         while ((task = tasks.poll()) != null) {
-            task.run();
+            try {
+                task.run();
+            } catch (Throwable t) {
+                // 单个任务异常不中断排空，避免后续任务滞留队列
+                LOG.warn("主线程任务异常：{}", t.toString());
+            }
             if (System.nanoTime() > deadline) {
                 return;
             }
         }
+    }
+
+    /** 队列积压量，供诊断使用。 */
+    public int pendingCount() {
+        return tasks.size();
     }
 
     /** 统一输出前缀与颜色。 */
