@@ -1,6 +1,7 @@
 package com.dsmnh.mobile.modserver;
 
 import com.dsmnh.mobile.modserver.node.NodeJson;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import net.minecraft.item.Item;
@@ -11,7 +12,9 @@ import net.minecraftforge.common.DimensionManager;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.io.File;
 import java.lang.reflect.Method;
+import java.nio.file.Files;
 import java.util.Collection;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -24,6 +27,8 @@ import java.util.concurrent.ConcurrentMap;
 public final class MeAdapter {
     private static final Logger LOG = LogManager.getLogger("dsmnhmobile");
     private static final ConcurrentMap<String, Device> DEVICES = new ConcurrentHashMap<String, Device>();
+    /** 配置目录下的设备清单文件，由主类在 preInit 设置；为空时仅保存在内存。 */
+    private static volatile File storeFile;
 
     /** 已登记设备：坐标为 AE2 网格方块位置，不主动加载维度或区块。 */
     public static final class Device {
@@ -51,16 +56,78 @@ public final class MeAdapter {
 
     public static void register(String deviceId, int dim, int x, int y, int z,
                                 String owner, String kind) {
-        if (deviceId == null || deviceId.isEmpty()) {
-            return;
+        if (put(deviceId, dim, x, y, z, owner, kind)) {
+            save();
         }
-        DEVICES.put(deviceId, new Device(deviceId, dim, x, y, z,
-                owner == null ? "" : owner, kind == null ? "monitor" : kind));
     }
 
     public static void unregister(String deviceId) {
-        if (deviceId != null) {
-            DEVICES.remove(deviceId);
+        if (deviceId != null && DEVICES.remove(deviceId) != null) {
+            save();
+        }
+    }
+
+    /** 登记但不落盘，供 load() 恢复时使用。 */
+    private static boolean put(String deviceId, int dim, int x, int y, int z,
+                               String owner, String kind) {
+        if (deviceId == null || deviceId.isEmpty()) {
+            return false;
+        }
+        DEVICES.put(deviceId, new Device(deviceId, dim, x, y, z,
+                owner == null ? "" : owner, kind == null ? "monitor" : kind));
+        return true;
+    }
+
+    /** 配置目录下的清单文件；为空时设备登记只保存在内存。 */
+    public static void setStore(File file) {
+        storeFile = file;
+    }
+
+    /** 从清单恢复设备；文件缺失或损坏时保持当前内存状态。 */
+    public static synchronized void load() {
+        File file = storeFile;
+        if (file == null || !file.isFile()) {
+            return;
+        }
+        try {
+            JsonNode root = NodeJson.MAPPER.readTree(file);
+            JsonNode devices = root.path("devices");
+            if (!devices.isArray()) {
+                return;
+            }
+            DEVICES.clear();
+            for (JsonNode n : devices) {
+                put(n.path("deviceId").asText(""), n.path("dim").asInt(0),
+                        n.path("x").asInt(0), n.path("y").asInt(0), n.path("z").asInt(0),
+                        n.path("owner").asText(""), n.path("kind").asText("monitor"));
+            }
+            LOG.info("已恢复 {} 个 ME 设备登记", DEVICES.size());
+        } catch (Throwable t) {
+            LOG.warn("ME 设备清单加载失败：{}", t.toString());
+        }
+    }
+
+    /** 写回清单；失败只记录日志，不影响内存中的登记。 */
+    public static synchronized void save() {
+        File file = storeFile;
+        if (file == null) {
+            return;
+        }
+        try {
+            ObjectNode root = NodeJson.object();
+            ArrayNode devices = root.putArray("devices");
+            for (Device d : DEVICES.values()) {
+                devices.addObject().put("deviceId", d.deviceId).put("dim", d.dim)
+                        .put("x", d.x).put("y", d.y).put("z", d.z)
+                        .put("owner", d.owner).put("kind", d.kind);
+            }
+            File parent = file.getParentFile();
+            if (parent != null && !parent.isDirectory()) {
+                parent.mkdirs();
+            }
+            Files.write(file.toPath(), NodeJson.write(root));
+        } catch (Throwable t) {
+            LOG.warn("ME 设备清单保存失败：{}", t.toString());
         }
     }
 

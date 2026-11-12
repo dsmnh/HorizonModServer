@@ -58,6 +58,8 @@ public final class HorizonModServer {
         }
         credentialFile = new File(event.getModConfigurationDirectory(), "dsmnhmobile-node-credential.json");
         BqAdapter.setBackupDir(event.getModConfigurationDirectory());
+        MeAdapter.setStore(new File(event.getModConfigurationDirectory(), "dsmnhmobile-me-devices.json"));
+        MeAdapter.load();
         queue = new MainThreadQueue();
         queue.register();
         MinecraftForge.EVENT_BUS.register(this);
