@@ -118,8 +118,13 @@ public final class HorizonModServer {
      * 游戏内公屏 → 后端 chat.relay（契约 1.4.0）：有 chat 订阅时才投递（零闲时开销）。
      * 仅玩家公屏（ServerChatEvent 不含命令与私聊）；判断在事件线程，投递异步，不阻塞聊天。
      */
-    @cpw.mods.fml.common.eventhandler.SubscribeEvent
+    @cpw.mods.fml.common.eventhandler.SubscribeEvent(
+        priority = cpw.mods.fml.common.eventhandler.EventPriority.LOWEST)
     public void onServerChat(ServerChatEvent event) {
+        // 同服装有 HorizonChat 时公屏由它格式化并投递节点平面，事件已被取消，此处只做后备上报
+        if (event.isCanceled()) {
+            return;
+        }
         NodeClient current = node;
         if (current == null || !current.isAuthenticated()) {
             return;
