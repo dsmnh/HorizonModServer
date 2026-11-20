@@ -459,15 +459,78 @@ public final class HorizonModServer {
         if (name == null) {
             return "player not online: " + player;
         }
-        // 经控制台命令通道执行（name 来自在线玩家的 UUID 解析，无注入面）；
-        // GTNH 映射下 ServerConfigurationManager 无稳定的 addOp/removeOp 源码名
+        // 优先直接调用玩家列表的 addOp/removeOp：命令通道在 Cauldron 下返回 0 却已生效，
+        // 无法据此判定结果；直接调用后再用 isOpped 复核。
+        Object profile = gameProfile(name);
+        String viaApi = profile == null ? "缺少玩家档案" : applyOpDirect(server, profile, grant);
+        if (viaApi == null) {
+            LOG.info("{} OP：{}", grant ? "已授予" : "已撤销", name);
+            return null;
+        }
         String command = (grant ? "op " : "deop ") + name;
         int affected = server.getCommandManager().executeCommand(server, command);
         if (affected <= 0) {
-            return "command had no effect: " + command;
+            return viaApi + "；命令通道无返回：" + command;
         }
-        LOG.info("{} OP：{}", grant ? "已授予" : "已撤销", name);
+        LOG.info("{} OP：{}（命令通道）", grant ? "已授予" : "已撤销", name);
         return null;
+    }
+
+    /** 取在线玩家的游戏档案；离线或档案缺失返回 null。 */
+    private Object gameProfile(String name) {
+        net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
+        for (Object o : new java.util.ArrayList<Object>(
+                server.getConfigurationManager().playerEntityList)) {
+            net.minecraft.entity.player.EntityPlayer player =
+                    (net.minecraft.entity.player.EntityPlayer) o;
+            if (player.getCommandSenderName().equals(name)) {
+                return player.getGameProfile();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 直接调用 ServerConfigurationManager 的 addOp/removeOp 并复核结果。
+     * 返回 null 表示成功，否则为失败原因（供命令通道后备使用）。
+     */
+    private String applyOpDirect(net.minecraft.server.MinecraftServer server, Object profile, boolean grant) {
+        Object manager = server.getConfigurationManager();
+        Class<?> profileType = profile.getClass();
+        try {
+            String[] names = grant
+                    ? new String[]{"addOp", "func_152605_a"}
+                    : new String[]{"removeOp", "func_152610_b"};
+            java.lang.reflect.Method target = null;
+            for (String name : names) {
+                try {
+                    target = manager.getClass().getMethod(name, profileType);
+                    break;
+                } catch (Throwable ignored) {
+                    // 换下一个候选名
+                }
+            }
+            if (target == null) {
+                return "玩家列表缺少 OP 变更方法";
+            }
+            target.invoke(manager, profile);
+            if (isOpped(manager, profile) != grant) {
+                return "OP 变更后状态未同步";
+            }
+            return null;
+        } catch (Throwable t) {
+            return "OP 变更失败：" + t;
+        }
+    }
+
+    private boolean isOpped(Object manager, Object profile) {
+        try {
+            java.lang.reflect.Method m = manager.getClass()
+                    .getMethod("func_152607_e", profile.getClass());
+            return Boolean.TRUE.equals(m.invoke(manager, profile));
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     /** 阶段 1 仅解析在线玩家；离线解析留待玩家名上报落地。 */
