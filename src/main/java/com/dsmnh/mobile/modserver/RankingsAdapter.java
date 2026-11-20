@@ -47,15 +47,26 @@ public final class RankingsAdapter {
             if (scoreboard == null || dummy == null) {
                 return "scoreboard 或 dummy criteria 不可用";
             }
-            Method getObjective = bySignature(sbType, new Class<?>[]{String.class}, objType);
-            Method addObjective = bySignature(sbType, new Class<?>[]{String.class, criteriaType}, objType);
-            Method setDisplay = bySignature(sbType, new Class<?>[]{int.class, objType}, void.class);
-            Method getValue = bySignature(sbType, new Class<?>[]{String.class, objType}, scoreType);
+            Method getObjective = orNamed(bySignature(sbType, new Class<?>[]{String.class}, objType),
+                    sbType, new Class<?>[]{String.class}, "getObjective", "func_96518_b");
+            Method addObjective = orNamed(bySignature(sbType, new Class<?>[]{String.class, criteriaType}, objType),
+                    sbType, new Class<?>[]{String.class, criteriaType}, "addObjective", "func_96535_a");
+            Method setDisplay = orNamed(bySignature(sbType, new Class<?>[]{int.class, objType}, void.class),
+                    sbType, new Class<?>[]{int.class, objType}, "setObjectiveInDisplaySlot", "func_96530_a");
+            Method getValue = orNamed(bySignature(sbType, new Class<?>[]{String.class, objType}, scoreType),
+                    sbType, new Class<?>[]{String.class, objType}, "getValueFromObjective", "func_96529_a");
             Method setPoints = scoreSetter(scoreType);
-            Method setDisplayName = bySignature(objType, new Class<?>[]{String.class}, void.class);
-            if (getObjective == null || addObjective == null || setDisplay == null
-                    || getValue == null || setPoints == null) {
-                return "scoreboard 方法签名未匹配";
+            Method setDisplayName = orNamed(bySignature(objType, new Class<?>[]{String.class}, void.class),
+                    objType, new Class<?>[]{String.class}, "setDisplayName", "func_96681_a");
+            StringBuilder missing = new StringBuilder();
+            appendMissing(missing, "getObjective", getObjective);
+            appendMissing(missing, "addObjective", addObjective);
+            appendMissing(missing, "setDisplay", setDisplay);
+            appendMissing(missing, "getValue", getValue);
+            appendMissing(missing, "setPoints", setPoints);
+            if (missing.length() > 0) {
+                // 反射查找失败时列出具体缺失项，便于按版本补充候选名
+                return "scoreboard 方法签名未匹配：" + missing;
             }
             Map<String, String> names = onlineNames(server);
             boolean first = true;
@@ -170,12 +181,36 @@ public final class RankingsAdapter {
     }
 
     private static Method scoreSetter(Class<?> scoreType) {
-        for (String name : new String[]{"setScorePoints", "func_96647_d"}) {
+        for (String name : new String[]{"setScorePoints", "func_96647_c"}) {
             try {
                 Method m = scoreType.getMethod(name, int.class);
                 if (m.getReturnType() == void.class) {
                     return m;
                 }
+            } catch (Throwable ignored) {
+                // 换下一个候选名
+            }
+        }
+        return null;
+    }
+
+    private static void appendMissing(StringBuilder out, String label, Method method) {
+        if (method == null) {
+            if (out.length() > 0) {
+                out.append('、');
+            }
+            out.append(label);
+        }
+    }
+
+    /** 签名查找失败时退回显式方法名，覆盖不同映射版本的命名差异。 */
+    private static Method orNamed(Method found, Class<?> type, Class<?>[] params, String... names) {
+        if (found != null) {
+            return found;
+        }
+        for (String name : names) {
+            try {
+                return type.getMethod(name, params);
             } catch (Throwable ignored) {
                 // 换下一个候选名
             }
