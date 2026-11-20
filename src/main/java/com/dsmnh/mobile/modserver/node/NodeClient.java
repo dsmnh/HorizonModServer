@@ -339,32 +339,14 @@ public final class NodeClient implements Closeable {
             pending.remove(id);
             if (err != null) {
                 log("下行流订阅未确认（后端可能不支持）：err=" + err);
+            } else if (res != null && res.has("m") && !res.path("m").isNull()) {
+                log("ops 流订阅被拒绝（后端低版本或不支持）：" + res.path("m").asText());
             }
         });
     }
 
+    /** chat 流订阅（契约 1.6.3）：收其它子服公聊，落本服游戏内广播。 */
     private void subscribeChat() {
-        long id = idGen.incrementAndGet();
-        CompletableFuture<JsonNode> future = new CompletableFuture<JsonNode>();
-        pending.put(id, future);
-        try {
-            ObjectNode request = NodeJson.object();
-            request.put("id", id);
-            request.put("op", "ops");
-            request.set("p", NodeJson.object());
-            send(NodeProtocol.T_SUB, NodeJson.write(request));
-        } catch (Exception e) {
-            pending.remove(id);
-            log("订阅下行流失败：" + e);
-            return;
-        }
-        future.whenComplete((res, err) -> {
-            pending.remove(id);
-            if (err != null) {
-                log("下行流订阅未确认（后端可能不支持）：err=" + err);
-            }
-        });
-        // chat 流订阅（1.4.0）
         long chatId = idGen.incrementAndGet();
         CompletableFuture<JsonNode> chatFuture = new CompletableFuture<JsonNode>();
         pending.put(chatId, chatFuture);
@@ -383,6 +365,8 @@ public final class NodeClient implements Closeable {
             pending.remove(chatId);
             if (err != null) {
                 log("chat 流订阅未确认：err=" + err);
+            } else if (res != null && res.has("m") && !res.path("m").isNull()) {
+                log("chat 流订阅被拒绝（后端低版本或不支持）：" + res.path("m").asText());
             }
         });
     }

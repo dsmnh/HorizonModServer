@@ -166,7 +166,8 @@ public final class SuAdapter {
             Object u = mGetUniverse.invoke(null);
             if (u == null) return out;
             Method getPlayers = u.getClass().getMethod("getPlayers");
-            List<?> allPlayers = (List<?>) getPlayers.invoke(u);
+            // SU 的 getPlayers() 返回 HashMap$Values（Collection），不能强转 List
+            Iterable<?> allPlayers = (Iterable<?>) getPlayers.invoke(u);
             for (Map.Entry<?, ?> entry : leaderboards.entrySet()) {
                 Object lb = entry.getValue();
                 String lbName = plain(mGetTitle.invoke(lb));
