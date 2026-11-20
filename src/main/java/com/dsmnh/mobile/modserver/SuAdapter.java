@@ -170,15 +170,17 @@ public final class SuAdapter {
             Iterable<?> allPlayers = (Iterable<?>) getPlayers.invoke(u);
             for (Map.Entry<?, ?> entry : leaderboards.entrySet()) {
                 Object lb = entry.getValue();
-                String lbName = plain(mGetTitle.invoke(lb));
+                // Leaderboard 不是 ForgeTeam 的子类，标题要用它自己的 getTitle
+                String lbName = plain(lb.getClass().getMethod("getTitle").invoke(lb));
                 ObjectNode board = boards.addObject();
                 board.put("id", entry.getKey().toString());
                 board.put("name", lbName);
                 ArrayNode rows = board.putArray("rows");
+                // createValue 形参与具体榜单类无关，循环外解析一次即可
+                Method createValue = lb.getClass().getMethod("createValue",
+                        Class.forName("serverutils.lib.data.ForgePlayer"));
                 for (Object fpObj : allPlayers) {
                     try {
-                        Method createValue = lb.getClass().getMethod("createValue",
-                                Class.forName("serverutils.lib.data.ForgePlayer"));
                         Object value = createValue.invoke(lb, fpObj);
                         String text = plain(value);
                         String uuid = String.valueOf(
