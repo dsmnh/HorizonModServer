@@ -523,11 +523,12 @@ public final class HorizonModServer {
         }
     }
 
+    /** 以 OP 名单为准判断权限；权限判定方法会叠加白名单与在线标记，不能用作状态复核。 */
     private boolean isOpped(Object manager, Object profile) {
         try {
-            java.lang.reflect.Method m = manager.getClass()
-                    .getMethod("func_152607_e", profile.getClass());
-            return Boolean.TRUE.equals(m.invoke(manager, profile));
+            Object ops = manager.getClass().getMethod("func_152603_m").invoke(manager);
+            Object entry = ops.getClass().getMethod("func_152683_b", Object.class).invoke(ops, profile);
+            return entry != null;
         } catch (Throwable ignored) {
             return false;
         }
