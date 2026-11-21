@@ -38,6 +38,9 @@ public final class SuAdapter {
     private static Method mGetMembers;
     private static Method mGetName;
     private static Method mMarkDirty;
+    private static Method mRemoveTeam;
+    private static Method mGetTeamByName;
+    private static Method mGetUuid;
     private static Field fPlayerTeam;
     private static Field fUniversePlayers;
 
@@ -72,6 +75,10 @@ public final class SuAdapter {
             mGetOwner = forgeTeam.getMethod("getOwner");
             mGetMembers = forgeTeam.getMethod("getMembers");
             mGetName = forgePlayer.getMethod("getName");
+            // 1.6.3 补：中央解散/踢人后要能反向清理本服 SU 队伍与成员（契约 §8.2「解散均由适配器按差异执行」）
+            mRemoveTeam = universe.getMethod("removeTeam", forgeTeam);
+            mGetTeamByName = universe.getMethod("getTeam", String.class);
+            mGetUuid = forgePlayer.getMethod("getId");
             available = true;
             HorizonModServer.LOG.info("已接上 ServerUtilities（读+受限写）");
         } catch (Throwable t) {
@@ -214,6 +221,17 @@ public final class SuAdapter {
             if (name.isEmpty()) return "team name empty";
 
             Object existing = findTeamByName(u, name);
+            // 中央已无该队伍（解散）：载荷 members 为空数组。必须删掉本服 SU 队伍，
+            // 否则本服残留的组会一直显示，且下次对账还会把它当成合法队伍。
+            if (team.path("members").size() == 0) {
+                if (existing == null) {
+                    return null;
+                }
+                mRemoveTeam.invoke(u, existing);
+                markDirty(u);
+                HorizonModServer.LOG.info("队伍「{}」已按中央状态从本服 SU 删除", name);
+                return null;
+            }
             Object teamObj;
             if (existing != null) {
                 teamObj = existing;
@@ -233,6 +251,10 @@ public final class SuAdapter {
                 mAddTeam.invoke(u, teamObj);
             }
 
+            java.util.Set<String> centralUuids = new java.util.HashSet<String>();
+            for (JsonNode member : team.path("members")) {
+                centralUuids.add(member.path("uuid").asText());
+            }
             int offline = 0;
             for (JsonNode member : team.path("members")) {
                 String uuid = member.path("uuid").asText();
@@ -247,6 +269,35 @@ public final class SuAdapter {
                         .getMethod("valueOf", String.class)
                         .invoke(null, "leader".equals(role) ? "OWNER" : "vice".equals(role) ? "MOD" : "MEMBER");
                 mSetStatus.invoke(teamObj, fp, status);
+            }
+            // 差异移除：SU 里还挂着该队伍、但中央 members 已无此人（被踢/主动退出/转队）。
+            // isMember 由 ForgePlayer.team 决定，所以必须把 team 字段换回空队，光改 players 不够。
+            Object noneTeam = mGetTeamByName.invoke(u, "");
+            Object owner = mGetOwner.invoke(teamObj);
+            int removed = 0;
+            Object playersMap = fUniversePlayers.get(u);
+            if (playersMap instanceof Map) {
+                for (Object fpObj : ((Map<?, ?>) playersMap).values()) {
+                    Object currentTeam = fPlayerTeam.get(fpObj);
+                    if (currentTeam == null || !currentTeam.equals(teamObj)) {
+                        continue;
+                    }
+                    if (fpObj.equals(owner)) {
+                        continue;
+                    }
+                    String uuid = String.valueOf(mGetUuid.invoke(fpObj));
+                    if (centralUuids.contains(uuid)) {
+                        continue;
+                    }
+                    fPlayerTeam.set(fpObj, noneTeam);
+                    Object none = Class.forName("serverutils.lib.EnumTeamStatus")
+                            .getField("NONE").get(null);
+                    mSetStatus.invoke(teamObj, fpObj, none);
+                    removed += 1;
+                }
+            }
+            if (removed > 0) {
+                HorizonModServer.LOG.info("队伍「{}」已按中央状态移除 {} 名成员", name, removed);
             }
             if (offline > 0) {
                 return "offline members skipped: " + offline;
