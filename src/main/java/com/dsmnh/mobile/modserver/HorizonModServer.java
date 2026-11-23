@@ -240,10 +240,14 @@ public final class HorizonModServer {
                 // chat 流下行：App 公聊→游戏内显示（契约 1.4.0）。主线程投递。
                 String text = event.path("text").asText();
                 String srv = event.path("srv").asText("");
+                // 1.6.4：跨服公屏可带队伍标签，颜色取来源服的队伍色
+                String team = event.path("team").asText("");
+                String teamColor = event.path("teamColor").asText("b");
                 queue.enqueue(() -> {
                     net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
                     if (server != null && server.getConfigurationManager() != null) {
-                        String display = "§b[Horizon]§r " + (srv.isEmpty() ? "" : "§7[" + srv + "]§r ") + text;
+                        String tag = team.isEmpty() ? "" : "§" + teamColor + "[" + team + "]§r ";
+                        String display = "§b[Horizon]§r " + (srv.isEmpty() ? "" : "§7[" + srv + "]§r ") + tag + text;
                         server.getConfigurationManager().sendChatMsg(
                                 new net.minecraft.util.ChatComponentText(display));
                     }

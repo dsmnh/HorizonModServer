@@ -41,6 +41,8 @@ public final class SuAdapter {
     private static Method mRemoveTeam;
     private static Method mGetTeamByName;
     private static Method mGetUuid;
+    private static Method mForceAddMember;
+    private static Field fTeamOwner;
     private static Field fPlayerTeam;
     private static Field fUniversePlayers;
 
@@ -79,6 +81,10 @@ public final class SuAdapter {
             mRemoveTeam = universe.getMethod("removeTeam", forgeTeam);
             mGetTeamByName = universe.getMethod("getTeam", String.class);
             mGetUuid = forgePlayer.getMethod("getId");
+            // 建队时队伍还没有 owner，isValid() 为 false，setStatus/forceAddMember 都会被挡下；
+            // owner 是 public 字段，必须先直接写进去，队伍才成立。
+            mForceAddMember = forgeTeam.getMethod("forceAddMember", forgePlayer);
+            fTeamOwner = forgeTeam.getField("owner");
             available = true;
             HorizonModServer.LOG.info("已接上 ServerUtilities（读+受限写）");
         } catch (Throwable t) {
@@ -256,6 +262,17 @@ public final class SuAdapter {
                 centralUuids.add(member.path("uuid").asText());
             }
             int offline = 0;
+            // 队伍必须先有 owner 才 isValid()；没有 owner 时 setStatus 与 forceAddMember 都会直接返回 false，
+            // 队伍会永久停在无效态（表现为 SU 里看得到组名，但玩家 hasTeam=false、聊天队伍标签为空）。
+            if (mGetOwner.invoke(teamObj) == null) {
+                Object leaderFp = resolveMember(u, team.path("members"), true);
+                if (leaderFp == null) {
+                    leaderFp = resolveMember(u, team.path("members"), false);
+                }
+                if (leaderFp != null) {
+                    fTeamOwner.set(teamObj, leaderFp);
+                }
+            }
             for (JsonNode member : team.path("members")) {
                 String uuid = member.path("uuid").asText();
                 String role = member.path("role").asText("member");
@@ -264,7 +281,10 @@ public final class SuAdapter {
                     offline += 1;
                     continue;
                 }
-                fPlayerTeam.set(fp, teamObj);
+                Object added = mForceAddMember.invoke(teamObj, fp);
+                if (!Boolean.TRUE.equals(added)) {
+                    fPlayerTeam.set(fp, teamObj);
+                }
                 Object status = Class.forName("serverutils.lib.EnumTeamStatus")
                         .getMethod("valueOf", String.class)
                         .invoke(null, "leader".equals(role) ? "OWNER" : "vice".equals(role) ? "MOD" : "MEMBER");
@@ -307,6 +327,24 @@ public final class SuAdapter {
         } catch (Throwable t) {
             return "apply error: " + t;
         }
+    }
+
+/** 取成员列表里第一个在线的 ForgePlayer；leaderOnly 时只认 leader 角色。 */
+    private static Object resolveMember(Object universe, JsonNode members, boolean leaderOnly) throws Exception {
+        for (JsonNode member : members) {
+            if (leaderOnly && !"leader".equals(member.path("role").asText("member"))) {
+                continue;
+            }
+            String uuid = member.path("uuid").asText();
+            if (uuid.isEmpty()) {
+                continue;
+            }
+            Object fp = mGetPlayerByUuid.invoke(universe, java.util.UUID.fromString(uuid));
+            if (fp != null) {
+                return fp;
+            }
+        }
+        return null;
     }
 
     private static Object findTeamByName(Object universe, String name) throws Exception {
