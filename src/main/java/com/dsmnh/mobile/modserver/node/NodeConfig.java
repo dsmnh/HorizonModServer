@@ -10,6 +10,8 @@ public final class NodeConfig {
     public String nodeName = "";
     /** 组件标识，HELLO.app 使用。 */
     public String app = "HorizonModServer/0.1.0";
+    /** 本连接声明的能力位（契约 1.6.5 §8.8）：空列表即显式降级。 */
+    public java.util.List<String> caps = java.util.Collections.emptyList();
     public Path credentialFile;
     /** 请求超时（毫秒）。 */
     public long requestTimeoutMs = 15_000;

@@ -247,6 +247,15 @@ public final class NodeClient implements Closeable {
         hello.put("v", NodeProtocol.VERSION);
         hello.put("app", config.app);
         hello.put("plane", "node");
+        // 1.6.5 能力位声明（契约 §8.8）：数组固定携带，空数组表示本连接不具备官方队伍能力
+        com.fasterxml.jackson.databind.node.ArrayNode caps = hello.putArray("caps");
+        if (config.caps != null) {
+            for (String cap : config.caps) {
+                if (cap != null && !cap.isEmpty()) {
+                    caps.add(cap);
+                }
+            }
+        }
         send(NodeProtocol.T_HELLO, NodeJson.write(hello));
         NodeProtocol.Frame ack = NodeProtocol.read(in);
         if (ack == null) {

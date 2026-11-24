@@ -40,6 +40,10 @@ public final class HorizonModServer {
     private String nodeName;
     private String euJoinTemplate;
     private File credentialFile;
+    /** 队伍来源模式（契约 1.6.5 §8.8）：官方队伍、SU 旧链路或停用。 */
+    private TeamMode.Mode teamMode = TeamMode.Mode.SU;
+    private OfficialTeamReporter officialReporter;
+    private OfficialTeamWorlds officialWorlds;
 
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent event) {
@@ -53,9 +57,14 @@ public final class HorizonModServer {
                 "注册时自报名称（仅展示用）").getString();
         euJoinTemplate = config.get("node", "euJoinTemplate", EuJoinTemplate.DEFAULT,
                 "eu.join 命令模板，占位符 {player}/{team}").getString();
+        String configuredMode = config.get("team", "mode", "auto",
+                "队伍来源：auto/official 用 GTNHLib 官方队伍，su 用 ServerUtilities；"
+                        + "official 在缺少 GTNHLib 时停用队伍链路").getString();
         if (config.hasChanged()) {
             config.save();
         }
+        teamMode = TeamMode.resolve(configuredMode, OfficialTeamAdapter.available());
+        LOG.info("队伍模式：{}", TeamMode.describe(teamMode));
         credentialFile = new File(event.getModConfigurationDirectory(), "dsmnhmobile-node-credential.json");
         BqAdapter.setBackupDir(event.getModConfigurationDirectory());
         MeAdapter.setStore(new File(event.getModConfigurationDirectory(), "dsmnhmobile-me-devices.json"));
@@ -64,12 +73,82 @@ public final class HorizonModServer {
         queue.register();
         MinecraftForge.EVENT_BUS.register(this);
         tickMonitor.register();
+        if (teamMode == TeamMode.Mode.OFFICIAL) {
+            officialReporter = new OfficialTeamReporter(new OfficialTeamReporter.Source() {
+                @Override
+                public boolean ready() {
+                    net.minecraft.server.MinecraftServer server =
+                            net.minecraft.server.MinecraftServer.getServer();
+                    // GTNHLib 在 WorldEvent.Load(dim 0) 才重载队伍表：世界未加载时不上报队伍内容
+                    return server != null && server.isServerRunning()
+                            && server.worldServerForDimension(0) != null
+                            && OfficialTeamAdapter.onMainThread()
+                            && OfficialTeamAdapter.available();
+                }
+
+                @Override
+                public String worldRef() {
+                    return OfficialTeamAdapter.worldRef(
+                            net.minecraft.server.MinecraftServer.getServer());
+                }
+
+                @Override
+                public java.util.List<OfficialTeamSnapshot.Team> collect() {
+                    return OfficialTeamAdapter.collect();
+                }
+            }, new OfficialTeamReporter.Sink() {
+                @Override
+                public void send(ObjectNode body) {
+                    final NodeClient current = node;
+                    if (current == null || !current.isAuthenticated()) {
+                        return;
+                    }
+                    officialExecutor.execute(() -> {
+                        try {
+                            current.req("team.official.report", body);
+                        } catch (Exception e) {
+                            LOG.warn("官方队伍上报失败：{}", e.toString());
+                        }
+                    });
+                }
+            });
+            officialWorlds = new OfficialTeamWorlds(officialReporter);
+            MinecraftForge.EVENT_BUS.register(officialWorlds);
+            officialExecutor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "dsmnhmobile-official");
+                t.setDaemon(true);
+                return t;
+            });
+            officialExecutor.scheduleAtFixedRate(this::flushOfficialTeams, 2, 2,
+                    java.util.concurrent.TimeUnit.SECONDS);
+        }
     }
 
     private final TickMonitor tickMonitor = new TickMonitor();
 
     /** metrics 上报循环（5s 一帧，契约 1.5.0 §8.6；节点连接后启动）。 */
     private java.util.concurrent.ScheduledExecutorService metricsExecutor;
+    /** 官方队伍投影的后台执行器（序列化与发送，契约 1.6.5 §8.8）。 */
+    private java.util.concurrent.ScheduledExecutorService officialExecutor;
+
+    /** 官方队伍周期上报：采集在主线程，投递在 officialExecutor。 */
+    private void flushOfficialTeams() {
+        final OfficialTeamReporter reporter = officialReporter;
+        if (reporter == null) {
+            return;
+        }
+        queue.enqueue(new Runnable() {
+            @Override
+            public void run() {
+                OfficialTeamSnapshot snapshot = reporter.take();
+                if (snapshot == null) {
+                    return;
+                }
+                // 序列化留在采集线程之外：take() 结束后快照已不可变
+                reporter.dispatch(snapshot);
+            }
+        });
+    }
 
     private void startMetricsLoop() {
         if (metricsExecutor != null) return;
@@ -204,6 +283,10 @@ public final class HorizonModServer {
             metricsExecutor.shutdownNow();
             metricsExecutor = null;
         }
+        if (officialExecutor != null) {
+            officialExecutor.shutdownNow();
+            officialExecutor = null;
+        }
         if (node != null) {
             node.close();
             node = null;
@@ -217,6 +300,8 @@ public final class HorizonModServer {
         config.backendPort = backendPort;
         config.nodeName = nodeName;
         config.app = "HorizonModServer/" + Tags.VERSION;
+        // 契约 1.6.5 §8.8：官方模式声明 gtnh，其余模式显式声明空数组（降级）
+        config.caps = TeamMode.capabilities(teamMode);
         return config;
     }
 
@@ -230,7 +315,15 @@ public final class HorizonModServer {
             @Override
             public void onConnected(long nodeId) {
                 LOG.info("已连接 Horizon 后端（节点 {}）", nodeId);
-                reportTeams();
+                // 官方模式下后端不再接收 SU 队伍对账，改由官方投影上报
+                if (teamMode == TeamMode.Mode.OFFICIAL) {
+                    if (officialReporter != null) {
+                        officialReporter.onConnectionEstablished();
+                    }
+                    flushOfficialTeams();
+                } else if (teamMode == TeamMode.Mode.SU) {
+                    reportTeams();
+                }
                 reportPlayerNames(null);
                 startMetricsLoop();
             }
@@ -282,6 +375,13 @@ public final class HorizonModServer {
             case TEAM_APPLY: {
                 final JsonNode team = p.path("team");
                 final JsonNode relations = p.path("relations");
+                if (!TeamMode.allowsSuTeamWrites(teamMode)) {
+                    // 官方模式下队伍写入由官方入口负责（契约 §8.8）：不落 SU，也不重试
+                    LOG.warn("队伍模式为 {}，忽略 team.apply（teamId={}）",
+                            teamMode, team.path("teamId").asText(""));
+                    reportOpResult(opId, null);
+                    return;
+                }
                 queue.enqueue(new Runnable() {
                     @Override
                     public void run() {
@@ -302,6 +402,11 @@ public final class HorizonModServer {
                 return;
             }
             case EU_JOIN: {
+                if (!TeamMode.allowsSuTeamWrites(teamMode)) {
+                    LOG.warn("队伍模式为 {}，忽略 eu.join（团队加入改由官方入口承担）", teamMode);
+                    reportOpResult(opId, null);
+                    return;
+                }
                 queue.enqueue(new Runnable() {
                     @Override
                     public void run() {
@@ -599,6 +704,9 @@ public final class HorizonModServer {
 
     /** 队伍对账上报（契约 1.3.0）：聚合本服 SU 队伍经 team.report 上交。 */
     private void reportTeams() {
+        if (!TeamMode.allowsSuTeamWrites(teamMode)) {
+            return;
+        }
         final NodeClient current = node;
         if (current == null) return;
         new Thread(new Runnable() {
