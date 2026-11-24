@@ -13,6 +13,7 @@ public final class DownOpRouter {
         BQ_IMPORT,
         RANKINGS_APPLY,
         ME_QUERY,
+        OFFICIAL_WRITE,
         REJECT
     }
 
@@ -34,6 +35,9 @@ public final class DownOpRouter {
         }
         if (DownOpTypes.ME_QUERY.equals(type)) {
             return Action.ME_QUERY;
+        }
+        if (DownOpTypes.OFFICIAL_WRITE.equals(type)) {
+            return Action.OFFICIAL_WRITE;
         }
         if (DownOpTypes.BQ_APPLY.equals(type)) {
             if ("export".equals(phase)) {

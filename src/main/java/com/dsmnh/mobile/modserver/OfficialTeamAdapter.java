@@ -107,6 +107,45 @@ public final class OfficialTeamAdapter {
     }
 
     /**
+     * 查某 UUID 在某官方队伍中的角色（主线程）：owner / officer / member，非成员返回空串。
+     * 供受控写入做与投影一致的前置判定（契约 1.6.6 §8.9），真正的授权仍由 GTNHLib 裁定。
+     */
+    public static String roleOf(String officialTeamId, String uuid) {
+        if (!available() || officialTeamId == null || officialTeamId.isEmpty()
+                || uuid == null || uuid.isEmpty()) {
+            return "";
+        }
+        try {
+            UUID id = UUID.fromString(uuid);
+            Object map = mGetTeamMap.invoke(null);
+            if (!(map instanceof Map)) {
+                return "";
+            }
+            for (Object team : ((Map<?, ?>) map).values()) {
+                if (team == null || !officialTeamId.equals(String.valueOf(mGetTeamId.invoke(team)))) {
+                    continue;
+                }
+                if (contains(mGetOwners.invoke(team), id)) {
+                    return "owner";
+                }
+                if (contains(mGetOfficers.invoke(team), id)) {
+                    return "officer";
+                }
+                if (contains(mGetMembers.invoke(team), id)) {
+                    return "member";
+                }
+            }
+        } catch (Throwable t) {
+            HorizonModServer.LOG.warn("官方队伍角色查询失败：{}", t.toString());
+        }
+        return "";
+    }
+
+    private static boolean contains(Object set, UUID id) {
+        return set instanceof Collection && ((Collection<?>) set).contains(id);
+    }
+
+    /**
      * 世界标识：世界目录名 + 世界种子。同一存档跨重启保持稳定，
      * 换图或恢复他人备份时必然变化，避免后端把两份世界当成同一份投影。
      */

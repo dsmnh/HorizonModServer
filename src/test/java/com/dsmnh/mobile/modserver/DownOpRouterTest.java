@@ -8,13 +8,14 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** 登记表 §6 六类下行类型均须有执行分支；BQ 两阶段由 phase 区分。 */
+/** 登记表 §6 下行类型均须有执行分支（1.6.6 增至七类）；BQ 两阶段由 phase 区分。 */
 public class DownOpRouterTest {
 
     @Test
     public void registeredTypesCoverContractRegistry() {
         Set<String> expected = new LinkedHashSet<String>(Arrays.asList(
-                "op.set", "team.apply", "eu.join", "bq.apply", "rankings.apply", "me.query"));
+                "op.set", "team.apply", "eu.join", "bq.apply", "rankings.apply", "me.query",
+                "official.write"));
         assertEquals(expected, DownOpTypes.ALL);
         for (String type : expected) {
             assertTrue(DownOpTypes.isKnown(type));
@@ -30,6 +31,7 @@ public class DownOpRouterTest {
         assertEquals(DownOpRouter.Action.EU_JOIN, DownOpRouter.route("eu.join", ""));
         assertEquals(DownOpRouter.Action.RANKINGS_APPLY, DownOpRouter.route("rankings.apply", ""));
         assertEquals(DownOpRouter.Action.ME_QUERY, DownOpRouter.route("me.query", ""));
+        assertEquals(DownOpRouter.Action.OFFICIAL_WRITE, DownOpRouter.route("official.write", ""));
     }
 
     @Test

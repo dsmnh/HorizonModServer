@@ -434,6 +434,9 @@ public final class HorizonModServer {
             case ME_QUERY:
                 handleMeQuery(opId, p);
                 return;
+            case OFFICIAL_WRITE:
+                handleOfficialWrite(opId, p);
+                return;
             default:
                 reportOpResult(opId, DownOpRouter.rejectReason(type, phase));
         }
@@ -551,6 +554,82 @@ public final class HorizonModServer {
                 });
             }
         });
+    }
+
+    /**
+     * official.write（契约 1.6.6 §8.9）：在主线程调用 GTNHLib TeamActions，随后经
+     * official.write.report 回报。节点只做与投影一致的前置判定，名单变更全部交给官方动作。
+     */
+    private void handleOfficialWrite(final String opId, final JsonNode p) {
+        final String action = OfficialTeamWriter.actionOf(p);
+        final String officialTeamId = p.path("officialTeamId").asText("");
+        final String actorUuid = p.path("actorUuid").asText("");
+        final String targetUuid = p.path("targetUuid").asText("");
+        final long expectGen = p.path("expectGen").asLong(-1L);
+        if (actorUuid.isEmpty() || targetUuid.isEmpty() || officialTeamId.isEmpty()) {
+            reportOfficialWrite(opId, false, "BAD_PARAMS", 0L, 0L, null);
+            return;
+        }
+        queue.enqueue(new Runnable() {
+            @Override
+            public void run() {
+                final OfficialTeamReporter reporter = officialReporter;
+                long gen = reporter == null ? 0L : reporter.gen();
+                long seq = reporter == null ? 0L : reporter.seq();
+                boolean officialMode = teamMode == TeamMode.Mode.OFFICIAL;
+                boolean actorOnline = OfficialTeamWriter.findPlayer(actorUuid) != null;
+                boolean targetOnline = OfficialTeamWriter.findPlayer(targetUuid) != null;
+                String role = OfficialTeamAdapter.roleOf(officialTeamId, actorUuid);
+                boolean officer = "owner".equals(role) || "officer".equals(role);
+                boolean online = OfficialWriteGuard.ACTION_ACCEPT.equals(action)
+                        ? actorOnline : (actorOnline && targetOnline);
+                String error = OfficialWriteGuard.check(action, officialMode, expectGen, gen,
+                        online, officer);
+                if (error != null) {
+                    LOG.warn("拒绝对官方队伍写入（opId={} action={} reason={}）", opId, action, error);
+                    reportOfficialWrite(opId, false, error, gen, seq, null);
+                    return;
+                }
+                OfficialTeamWriter.Result result = OfficialTeamWriter.execute(
+                        action, officialTeamId, actorUuid, targetUuid);
+                // 动作已改动官方名单：推进序号并安排一次重报，后端据此刷新投影（契约 §8.9）。
+                if (result.error == null && reporter != null) {
+                    reporter.markDirty();
+                    flushOfficialTeams();
+                }
+                reportOfficialWrite(opId, result.error == null, result.error, gen, seq, result.merged);
+            }
+        });
+    }
+
+    /** 回报官方写入结果（契约 1.6.6 §8.9）：成功与终结性失败都只报一次，不参与 node.op 重试。 */
+    private void reportOfficialWrite(final String opId, final boolean ok, final String error,
+            final long gen, final long seq, final ObjectNode merged) {
+        final NodeClient current = node;
+        if (current == null) {
+            return;
+        }
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    ObjectNode p = NodeJson.object();
+                    p.put("opId", opId);
+                    p.put("ok", ok);
+                    if (!ok && error != null) {
+                        p.put("error", error);
+                    }
+                    p.put("gen", gen);
+                    p.put("seq", seq);
+                    if (merged != null) {
+                        p.set("merged", merged);
+                    }
+                    current.req("official.write.report", p);
+                } catch (Exception e) {
+                    LOG.warn("回报官方写入结果失败：{}", e.toString());
+                }
+            }
+        }, "dsmnhmobile-op-report").start();
     }
 
     /** 阻塞式节点请求统一在后台线程执行，避免占用主线程。 */
